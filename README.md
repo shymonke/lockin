@@ -76,6 +76,22 @@ Diagnostics (print only, nothing saved):
 
 Data lives in `%APPDATA%\LockIn` (`settings.json`, `stats.json`, `memes\`).
 
+## Development
+
+Run `powershell -ExecutionPolicy Bypass -File scripts/dev.ps1` to build and launch,
+then rebuild after changes to `src/`, `assets/` (including when created later),
+`models/`, or `Cargo.toml`. Changes debounce for one second. A successful build
+replaces the script's running app using `run/lockin.exe`; a failed build prints
+the error tail and keeps the previous app running. Close any separately launched
+LockIn first, since the app permits only one instance.
+
+Add `-Release` for release builds, or `-Once` for one build and launch without
+watching. Both modes stay attached until Ctrl+C (which stops the app and watcher);
+`-Once` also returns when the app exits. PowerShell 5+ is supported. If Cargo is
+missing from PATH, the script adds the local GNU Rust and MinGW toolchain paths.
+To use disposable settings, set `$env:APPDATA = Join-Path $env:TEMP 'LockIn-dev'`
+before starting the script.
+
 ## Limits
 
 - Gaze means head pose from 5 face landmarks, not iris tracking. Calibrate both poses for your setup.

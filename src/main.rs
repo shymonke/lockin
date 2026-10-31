@@ -16,6 +16,7 @@ mod theme;
 mod ui;
 mod vision;
 mod web;
+mod window_frame;
 
 use eframe::egui;
 
@@ -29,6 +30,7 @@ impl eframe::App for app::App {
         self.pill_ui(ui);
         self.alert_window(&ctx);
         self.calc_window(&ctx);
+        window_frame::remove_overlay_frames();
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
