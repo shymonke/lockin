@@ -2,11 +2,11 @@
 //!
 //! Layers, cheapest first:
 //! - L0 screen: foreground app/site, polled every second (no screenshots).
-//! - L1 camera: face + head pose, one frame every few seconds; switches to fast sampling when off.
+//! - L1 camera: face + iris/head features, one frame every few seconds; switches to fast sampling when off.
 //! - L2 camera: object detector (person / phone), only on demand (face lost, long head-down).
 //! A long "looking at screen" streak triggers a screen check against the site lists.
 
-use crate::config::{Calibration, Pose, Settings};
+use crate::config::{Calibration, FeatureSample, Pose, Settings, GAZE_FEATURES};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,6 +47,8 @@ pub enum Action {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CamObs {
     pub face: Option<Pose>,
+    /// Per-user eye/head classification from L1, when eye landmarks were usable.
+    pub gaze: Option<(Gaze, f32)>,
     /// L2 results, present only when L2 ran on this frame.
     pub person: Option<bool>,
     pub phone: Option<bool>,
@@ -133,7 +135,7 @@ pub fn classify_site(fg: &Foreground, s: &Settings, extra_blocked: &HashSet<Stri
 }
 
 /// Default poses when the user has not calibrated (frontal laptop webcam measured ~0.6-0.65 pitch).
-const DEFAULT_SCREEN: Pose = Pose { yaw: 0.0, pitch: 0.62, area: 0.0 };
+const DEFAULT_SCREEN: Pose = Pose { yaw: 0.0, pitch: 0.62, area: 0.0, roll: 0.0, center: [0.5, 0.5] };
 const AWAY_DIST: f32 = 0.28;
 const BOOK_PITCH_DROP: f32 = 0.22;
 
@@ -152,6 +154,82 @@ pub fn classify_gaze(p: Pose, cal: &Calibration) -> Gaze {
         return Gaze::Away;
     }
     if ds <= db { Gaze::Screen } else { Gaze::Book }
+}
+
+/// Classify a complete eye/head feature vector with a per-user diagonal Gaussian model.
+/// Returns `None` until all three guided targets have enough samples, preserving the legacy
+/// pose-only behaviour for old and partially calibrated settings.
+pub fn classify_gaze_features(sample: &FeatureSample, cal: &Calibration) -> Option<(Gaze, f32)> {
+    const MIN_SAMPLES: usize = 5;
+    const VAR_FLOOR: f32 = 0.16;
+    const OUTLIER_D2: f32 = 16.0;
+    // Avoid giving effectively infinite weight to a feature that did not happen to move during calibration.
+    const SCALE_FLOOR: [f32; GAZE_FEATURES] = [5.0, 5.0, 5.0, 0.05, 0.05, 0.05, 0.05, 0.04, 0.04, 0.01, 0.03, 0.03];
+    let classes: [(&[FeatureSample], Gaze); 3] = [
+        (&cal.screen_samples, Gaze::Screen),
+        (&cal.book_samples, Gaze::Book),
+        (&cal.away_samples, Gaze::Away),
+    ];
+    if classes.iter().any(|(s, _)| s.len() < MIN_SAMPLES) {
+        return None;
+    }
+
+    let total = classes.iter().map(|(s, _)| s.len()).sum::<usize>() as f32;
+    let mut mean = [0.0f32; GAZE_FEATURES];
+    for (samples, _) in &classes {
+        for s in *samples {
+            for (m, x) in mean.iter_mut().zip(s.values) {
+                *m += x / total;
+            }
+        }
+    }
+    let mut scale = [0.0f32; GAZE_FEATURES];
+    for (samples, _) in &classes {
+        for s in *samples {
+            for i in 0..GAZE_FEATURES {
+                scale[i] += (s.values[i] - mean[i]).powi(2) / total;
+            }
+        }
+    }
+    for (x, floor) in scale.iter_mut().zip(SCALE_FLOOR) {
+        *x = x.sqrt().max(floor);
+    }
+
+    let z: [f32; GAZE_FEATURES] = std::array::from_fn(|i| (sample.values[i] - mean[i]) / scale[i]);
+    let mut scored = [(Gaze::Away, f32::INFINITY, f32::INFINITY); 3];
+    for (ci, (samples, gaze)) in classes.iter().enumerate() {
+        let n = samples.len() as f32;
+        let mut cm = [0.0f32; GAZE_FEATURES];
+        for s in *samples {
+            for i in 0..GAZE_FEATURES {
+                cm[i] += ((s.values[i] - mean[i]) / scale[i]) / n;
+            }
+        }
+        let mut cv = [0.0f32; GAZE_FEATURES];
+        for s in *samples {
+            for i in 0..GAZE_FEATURES {
+                let x = (s.values[i] - mean[i]) / scale[i];
+                cv[i] += (x - cm[i]).powi(2) / n;
+            }
+        }
+        let mut d2 = 0.0;
+        let mut nll = 0.0;
+        for i in 0..GAZE_FEATURES {
+            let v = cv[i].max(VAR_FLOOR);
+            let q = (z[i] - cm[i]).powi(2) / v;
+            d2 += q / GAZE_FEATURES as f32;
+            nll += (q + v.ln()) / GAZE_FEATURES as f32;
+        }
+        scored[ci] = (*gaze, d2, nll);
+    }
+    scored.sort_by(|a, b| a.2.total_cmp(&b.2));
+    if scored[0].1 > OUTLIER_D2 {
+        let confidence = (0.5 + (1.0 - (-(scored[0].1 - OUTLIER_D2) * 0.08).exp()) * 0.5).clamp(0.0, 1.0);
+        return Some((Gaze::Away, confidence));
+    }
+    let best = scored[0].2;
+    let denom = scored.iter().map(|x| (-0.5 * (x.2 - best)).exp()).sum::<f32>();
+    Some((scored[0].0, (1.0 / denom).clamp(0.0, 1.0)))
 }
 
 const FACE_LOST_L2_SECS: f64 = 3.0;
@@ -269,7 +347,7 @@ impl Policy {
         let gaze = match obs.face {
             Some(p) => {
                 self.face_lost_since = None;
-                classify_gaze(p, &s.calibration)
+                obs.gaze.map(|g| g.0).unwrap_or_else(|| classify_gaze(p, &s.calibration))
             }
             None => {
                 let since = *self.face_lost_since.get_or_insert(now);
@@ -396,7 +474,7 @@ mod tests {
         Foreground { process: process.into(), title: title.into(), url: url.map(Into::into) }
     }
     fn face(pitch: f32) -> CamObs {
-        CamObs { face: Some(Pose { yaw: 0.0, pitch, area: 0.05 }), ..Default::default() }
+        CamObs { face: Some(Pose { yaw: 0.0, pitch, area: 0.05, ..Default::default() }), ..Default::default() }
     }
     fn alarms(a: &[Action]) -> Vec<&Action> {
         a.iter().filter(|x| matches!(x, Action::Alarm(_))).collect()
@@ -503,7 +581,12 @@ mod tests {
         let s = Settings::default();
         let mut p = Policy::default();
         p.restart(0.0);
-        let phone = |v| CamObs { face: Some(Pose { yaw: 0.0, pitch: 0.8, area: 0.05 }), person: Some(true), phone: Some(v) };
+        let phone = |v| CamObs {
+            face: Some(Pose { yaw: 0.0, pitch: 0.8, area: 0.05, ..Default::default() }),
+            person: Some(true),
+            phone: Some(v),
+            ..Default::default()
+        };
         assert!(alarms(&p.on_camera(phone(true), 1.0, &s)).is_empty());
         assert_eq!(alarms(&p.on_camera(phone(true), 6.0, &s)), vec![&Action::Alarm(Kind::Phone)]);
         assert!(p.on_camera(phone(false), 11.0, &s).contains(&Action::Recovered));
@@ -512,14 +595,77 @@ mod tests {
     #[test]
     fn gaze_classification_uses_calibration() {
         let cal = Calibration {
-            screen: Some(Pose { yaw: 0.05, pitch: 0.5, area: 0.06 }),
-            book: Some(Pose { yaw: 0.0, pitch: 0.85, area: 0.05 }),
+            screen: Some(Pose { yaw: 0.05, pitch: 0.5, area: 0.06, ..Default::default() }),
+            book: Some(Pose { yaw: 0.0, pitch: 0.85, area: 0.05, ..Default::default() }),
+            ..Default::default()
         };
-        let g = |yaw, pitch| classify_gaze(Pose { yaw, pitch, area: 0.05 }, &cal);
+        let g = |yaw, pitch| classify_gaze(Pose { yaw, pitch, area: 0.05, ..Default::default() }, &cal);
         assert_eq!(g(0.05, 0.52), Gaze::Screen);
         assert_eq!(g(0.0, 0.8), Gaze::Book);
         assert_eq!(g(0.0, 1.1), Gaze::Book, "further down than the book is still the desk");
         assert_eq!(g(0.6, 0.5), Gaze::Away);
         assert_eq!(g(0.0, 0.1), Gaze::Away, "looking up");
+    }
+
+    fn cluster(base: [f32; GAZE_FEATURES]) -> Vec<FeatureSample> {
+        (0..8)
+            .map(|n| {
+                let offset = (n as f32 - 3.5) * 0.002;
+                FeatureSample { values: std::array::from_fn(|i| base[i] + offset * (1.0 + i as f32 * 0.05)) }
+            })
+            .collect()
+    }
+
+    fn trained_calibration() -> Calibration {
+        let screen = [0.0, 0.0, 0.0, 0.50, 0.35, 0.50, 0.35, 0.28, 0.28, 0.08, 0.50, 0.48];
+        let book = [1.0, 14.0, 0.5, 0.51, 0.73, 0.49, 0.72, 0.24, 0.24, 0.07, 0.50, 0.56];
+        let away = [25.0, -4.0, 5.0, 0.78, 0.52, 0.76, 0.51, 0.25, 0.25, 0.06, 0.62, 0.48];
+        Calibration {
+            screen_samples: cluster(screen),
+            book_samples: cluster(book),
+            away_samples: cluster(away),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn feature_classifier_separates_calibrated_targets() {
+        let cal = trained_calibration();
+        for (samples, expected) in [
+            (&cal.screen_samples, Gaze::Screen),
+            (&cal.book_samples, Gaze::Book),
+            (&cal.away_samples, Gaze::Away),
+        ] {
+            let (actual, confidence) = classify_gaze_features(&samples[3], &cal).unwrap();
+            assert_eq!(actual, expected);
+            assert!(confidence > 0.5, "confidence {confidence}");
+        }
+    }
+
+    #[test]
+    fn feature_classifier_falls_back_to_away_for_outliers() {
+        let cal = trained_calibration();
+        let sample = FeatureSample { values: [200.0; GAZE_FEATURES] };
+        let (gaze, confidence) = classify_gaze_features(&sample, &cal).unwrap();
+        assert_eq!(gaze, Gaze::Away);
+        assert!(confidence >= 0.5);
+    }
+
+    #[test]
+    fn uncalibrated_feature_classifier_keeps_pose_default() {
+        let cal = Calibration::default();
+        assert_eq!(classify_gaze_features(&FeatureSample::default(), &cal), None);
+        assert_eq!(
+            classify_gaze(Pose { yaw: 0.0, pitch: 0.62, area: 0.05, ..Default::default() }, &cal),
+            Gaze::Screen
+        );
+    }
+
+    #[test]
+    fn old_calibration_json_still_deserializes() {
+        let old = r#"{"screen":{"yaw":0.1,"pitch":0.6,"area":0.08},"book":null}"#;
+        let cal: Calibration = serde_json::from_str(old).unwrap();
+        assert_eq!(cal.screen.unwrap().roll, 0.0);
+        assert!(cal.screen_samples.is_empty() && cal.book_samples.is_empty() && cal.away_samples.is_empty());
     }
 }

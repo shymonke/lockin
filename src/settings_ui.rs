@@ -273,6 +273,9 @@ impl App {
                 if ui.add_enabled(!busy, egui::Button::new("2. Look at the BOOK, then click")).clicked() {
                     a.calibrate(CalTarget::Book);
                 }
+                if ui.add_enabled(!busy, egui::Button::new("3. Look AWAY, then click")).clicked() {
+                    a.calibrate(CalTarget::Away);
+                }
             });
             if let Some(m) = &a.cal_msg {
                 ui.label(RichText::new(m).color(theme::LIME));
@@ -283,8 +286,10 @@ impl App {
             };
             hint(ui, &format!("Screen pose: {}", show(a.s.calibration.screen)));
             hint(ui, &format!("Book pose: {}", show(a.s.calibration.book)));
+            hint(ui, &format!("Eye samples: screen {}  book {}  away {}", a.s.calibration.screen_samples.len(), a.s.calibration.book_samples.len(), a.s.calibration.away_samples.len()));
             if ui.button("Reset calibration").clicked() {
                 a.s.calibration = Default::default();
+                let _ = a.vision.send(crate::vision::Cmd::SetCalibration(a.s.calibration.clone()));
             }
             ui.separator();
             ui.checkbox(&mut a.test_camera, "Live test (runs the camera now)");

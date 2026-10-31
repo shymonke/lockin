@@ -17,6 +17,7 @@ pub struct Camera {
     width: u32,
     height: u32,
     stride: i32,
+    last_grab: Option<std::time::Instant>,
 }
 
 const STREAM: u32 = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
@@ -105,7 +106,7 @@ impl Camera {
             let cur = reader.GetCurrentMediaType(STREAM)?;
             let (width, height) = frame_size(&cur).unwrap_or((640, 480));
             let stride = cur.GetUINT32(&MF_MT_DEFAULT_STRIDE).map(|v| v as i32).unwrap_or(width as i32 * 4);
-            Ok(Camera { reader, width, height, stride })
+            Ok(Camera { reader, width, height, stride, last_grab: None })
         }
     }
 
@@ -121,9 +122,11 @@ impl Camera {
 
     /// Grab the freshest frame into `frame` (reuses its buffer).
     pub fn grab(&mut self, frame: &mut Frame) -> Result<()> {
-        // The first read after an idle gap can be a stale queued frame; take the next one.
+        // The first read after an idle gap can be stale. At preview cadence there is no queue to
+        // drain, and reading twice would cap a 30 fps camera below the requested ~12 fps preview.
+        let reads = if self.last_grab.is_none_or(|t| t.elapsed() > std::time::Duration::from_millis(500)) { 2 } else { 1 };
         let mut sample = None;
-        for _ in 0..2 {
+        for _ in 0..reads {
             for _ in 0..30 {
                 if let Some(s) = self.read_sample()? {
                     sample = Some(s);
@@ -131,6 +134,7 @@ impl Camera {
                 }
             }
         }
+        self.last_grab = Some(std::time::Instant::now());
         let sample = sample.ok_or_else(|| windows::core::Error::from(MF_E_NO_SAMPLE_TIMESTAMP))?;
         unsafe {
             let buf = sample.ConvertToContiguousBuffer()?;

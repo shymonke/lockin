@@ -10,7 +10,7 @@ use crate::memes::{self, CatStyle, UserMeme};
 use crate::policy::{Action, Foreground, Gaze, Kind, Policy};
 use crate::pomodoro::{Event, Phase, Pomodoro};
 use crate::screen;
-use crate::vision::{self, CalTarget, Face, Objects};
+use crate::vision::{self, CalTarget, EyeOverlay, Face, Objects, PreviewSlot};
 use eframe::egui;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::Instant;
@@ -50,6 +50,8 @@ pub enum Tab {
 pub struct CamView {
     pub gaze: Option<Gaze>,
     pub face: Option<Face>,
+    pub eyes: Option<Vec<EyeOverlay>>,
+    pub confidence: f32,
     pub l1_ms: f32,
     pub l2: Option<(Objects, f32)>,
     pub error: Option<String>,
@@ -63,8 +65,10 @@ pub struct App {
     pub stats: Stats,
     pub pomo: Pomodoro,
     pub policy: Policy,
-    vision: Sender<vision::Cmd>,
+    pub vision: Sender<vision::Cmd>,
     vision_rx: Receiver<vision::Msg>,
+    #[allow(dead_code)] // Read by the WebView2 dashboard integration branch.
+    pub preview: PreviewSlot,
     screen: Sender<screen::Cmd>,
     screen_rx: Receiver<Option<Foreground>>,
     pub audio: audio::Tx,
@@ -105,7 +109,9 @@ impl App {
 
         let (vtx, vrx) = channel();
         let (vmsg_tx, vmsg_rx) = channel();
-        vision::spawn(vrx, vmsg_tx, Box::new(wake.clone()));
+        let preview = std::sync::Arc::new(std::sync::Mutex::new(None));
+        vision::spawn(vrx, vmsg_tx, Box::new(wake.clone()), preview.clone());
+        let _ = vtx.send(vision::Cmd::SetCalibration(s.calibration.clone()));
         let (stx, srx) = channel();
         let (smsg_tx, smsg_rx) = channel();
         screen::spawn(srx, smsg_tx, Box::new(wake.clone()));
@@ -126,6 +132,7 @@ impl App {
             policy: Policy::default(),
             vision: vtx,
             vision_rx: vmsg_rx,
+            preview,
             screen: stx,
             screen_rx: smsg_rx,
             audio: atx,
@@ -247,7 +254,7 @@ impl App {
 
     pub fn calibrate(&mut self, target: CalTarget) {
         self.calibrating = Some(target);
-        self.cal_msg = Some("Hold still for 2 seconds...".into());
+        self.cal_msg = Some("Hold your gaze on the target for 5 seconds...".into());
         let _ = self.vision.send(vision::Cmd::Calibrate { camera: self.s.camera_index, target });
     }
 
@@ -438,17 +445,16 @@ impl App {
         let mut actions = Vec::new();
         while let Ok(m) = self.vision_rx.try_recv() {
             match m {
-                vision::Msg::Obs { obs, face, l1_ms, l2 } => {
+                vision::Msg::Obs { obs, face, eyes, gaze, l1_ms, l2 } => {
                     self.cam.error = None;
                     self.cam.face = face;
+                    self.cam.eyes = eyes;
                     self.cam.l1_ms = l1_ms;
                     if l2.is_some() {
                         self.cam.l2 = l2;
                     }
-                    self.cam.gaze = Some(match obs.face {
-                        Some(p) => crate::policy::classify_gaze(p, &self.s.calibration),
-                        None => Gaze::Absent,
-                    });
+                    self.cam.gaze = gaze.map(|g| g.0);
+                    self.cam.confidence = gaze.map_or(0.0, |g| g.1);
                     if self.policy_live && self.s.camera_enabled {
                         actions.extend(self.policy.on_camera(obs, now, &self.s));
                         self.cam.gaze = self.policy.gaze;
@@ -461,24 +467,38 @@ impl App {
                         }
                     }
                 }
-                vision::Msg::Calibrated(target, pose) => {
+                vision::Msg::CalProgress { target, progress, samples } => {
+                    self.cal_msg = Some(format!("{target:?}: {:.0}% ({samples} good samples)", progress * 100.0));
+                }
+                vision::Msg::Calibrated { target, samples, error } => {
                     self.calibrating = None;
-                    match pose {
-                        Some(p) => {
+                    if let Some(e) = error {
+                        self.cal_msg = Some(e);
+                    } else {
+                        let count = samples.len();
+                        if matches!(target, CalTarget::Screen | CalTarget::Book) && count > 0 {
+                            let n = count as f32;
+                            let avg = |i: usize| samples.iter().map(|s| s.values[i]).sum::<f32>() / n;
+                            let p = crate::config::Pose {
+                                yaw: avg(0) / 70.0,
+                                pitch: avg(1) / 75.0 + 0.62,
+                                roll: avg(2),
+                                area: avg(9),
+                                center: [avg(10), avg(11)],
+                            };
                             match target {
                                 CalTarget::Screen => self.s.calibration.screen = Some(p),
                                 CalTarget::Book => self.s.calibration.book = Some(p),
+                                CalTarget::Away => {}
                             }
-                            self.cal_msg = Some(format!("Saved {target:?} pose (pitch {:.2}, yaw {:.2}).", p.pitch, p.yaw));
                         }
-                        None => {
-                            self.cal_msg = Some(match target {
-                                CalTarget::Screen => "No face found. Sit in front of the camera, check it isn't covered, then retry.".into(),
-                                CalTarget::Book => {
-                                    "No face found. Tilt the screen so the camera still sees your face while you read, then retry.".into()
-                                }
-                            });
+                        match target {
+                            CalTarget::Screen => self.s.calibration.screen_samples = samples,
+                            CalTarget::Book => self.s.calibration.book_samples = samples,
+                            CalTarget::Away => self.s.calibration.away_samples = samples,
                         }
+                        let _ = self.vision.send(vision::Cmd::SetCalibration(self.s.calibration.clone()));
+                        self.cal_msg = Some(format!("Saved {count} {target:?} samples."));
                     }
                 }
                 vision::Msg::Error(e) => {
@@ -585,6 +605,8 @@ impl App {
             if want.is_none() {
                 self.cam.gaze = None;
                 self.cam.face = None;
+                self.cam.eyes = None;
+                self.cam.confidence = 0.0;
             }
             self.cam_running = want;
         }
