@@ -49,7 +49,7 @@ svg .fill { fill: currentColor; stroke: none; }
 /* ---------- header ---------- */
 .bar { display: flex; align-items: center; justify-content: space-between; padding: 14px 22px 10px; }
 .brand { display: flex; align-items: center; gap: 10px; font: 600 15px/1 "Segoe UI Variable Display", "Segoe UI", sans-serif; letter-spacing: .01em; }
-.mark { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--focus); box-shadow: inset 0 0 0 3px var(--bg), inset 0 0 0 7px var(--focus); }
+.mark { width: 20px; height: 20px; flex: none; }
 .bar-actions { display: flex; align-items: center; gap: 6px; }
 .cam-select { display: flex; align-items: center; gap: 6px; color: var(--muted); padding: 0 10px; height: 34px; border-radius: var(--radius-s); background: var(--surface); }
 .cam-select select { background: transparent; border: 0; color: var(--text); max-width: 190px; outline: none; cursor: pointer; }
