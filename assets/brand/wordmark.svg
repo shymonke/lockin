@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 64" role="img" aria-labelledby="title desc">
+  <title id="title">LockIn wordmark</title>
+  <desc id="desc">The LockIn focus latch beside the product name.</desc>
+  <g transform="translate(4)">
+    <circle cx="32" cy="32" r="23" fill="none" stroke="#8CC7A5" stroke-width="7" stroke-linecap="round" stroke-dasharray="116 29" transform="rotate(-38 32 32)"/>
+    <path d="M32 32 48.5 15.5" fill="none" stroke="#9BB0F0" stroke-width="7" stroke-linecap="round"/>
+    <circle cx="32" cy="32" r="4.5" fill="#E4E7EC"/>
+  </g>
+  <text x="76" y="43.5" fill="#E4E7EC" font-family="'Segoe UI Variable Display','Segoe UI',Arial,sans-serif" font-size="34" font-weight="600" letter-spacing="-0.6">LockIn</text>
+</svg>

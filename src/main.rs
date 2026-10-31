@@ -53,8 +53,13 @@ fn main() {
         return;
     }
     let s = config::Settings::load();
+    let icon = image::load_from_memory(include_bytes!("../assets/brand/png/app-icon-64.png"))
+        .expect("embedded LockIn window icon")
+        .into_rgba8();
+    let (icon_width, icon_height) = icon.dimensions();
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("LockIn")
+        .with_icon(egui::IconData { rgba: icon.into_raw(), width: icon_width, height: icon_height })
         .with_inner_size(ui::PILL)
         .with_decorations(false)
         .with_transparent(true)
