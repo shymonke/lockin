@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LockIn</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="bar">
+  <div class="brand"><span class="mark" aria-hidden="true"></span>LockIn</div>
+  <div class="bar-actions">
+    <label class="cam-select" title="Camera">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7.5h10.5a1.5 1.5 0 0 1 1.5 1.5v6a1.5 1.5 0 0 1-1.5 1.5H4A1.5 1.5 0 0 1 2.5 15V9A1.5 1.5 0 0 1 4 7.5Zm12 3 5-2.5v8l-5-2.5"/></svg>
+      <select id="camera" aria-label="Camera"></select>
+    </label>
+    <button class="icon" id="help" title="Show me around" aria-label="Show me around">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.6 9.3a2.5 2.5 0 1 1 3.4 2.3c-.6.3-1 .8-1 1.5v.4"/><circle cx="12" cy="16.8" r=".6" class="fill"/></svg>
+    </button>
+    <button class="icon" id="open-settings" title="Settings" aria-label="Settings">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg>
+    </button>
+  </div>
+</header>
+
+<main>
+  <section class="stage" id="stage" aria-label="Camera">
+    <canvas id="view"></canvas>
+    <div class="stage-empty" id="stage-empty" hidden>
+      <p id="stage-empty-text">Starting your camera…</p>
+    </div>
+    <div class="chip" id="chip" data-tone="idle"><span class="dot"></span><span id="chip-text">Waiting for the camera</span><span class="conf" id="chip-conf"></span></div>
+    <button class="ghost stage-cal" id="calibrate">Calibrate</button>
+    <dl class="readout" id="readout" aria-label="Live measurements">
+      <div><dt>Head</dt><dd id="r-head">–</dd></div>
+      <div><dt>Eyes</dt><dd id="r-eyes">–</dd></div>
+      <div><dt>Check</dt><dd id="r-ms">–</dd></div>
+    </dl>
+  </section>
+
+  <section class="session" aria-label="Session">
+    <div class="clock">
+      <div class="time" id="time">25:00</div>
+      <div class="phase"><span id="phase">Focus</span><span class="sep"></span><span id="round"></span><span class="penalty" id="penalty"></span></div>
+    </div>
+    <div class="session-actions">
+      <button class="primary" id="start">Start focus</button>
+      <button class="secondary" id="brb" title="Ctrl+Alt+B">Step away</button>
+      <button class="icon quiet" id="skip" title="Skip to next phase" aria-label="Skip to next phase">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6.5v11l8-5.5zM17.5 6.5v11"/></svg>
+      </button>
+    </div>
+  </section>
+
+  <section class="today" aria-label="Today">
+    <div class="stat"><span class="v" id="t-focus">0m</span><span class="k">focused today</span></div>
+    <div class="goal"><div class="goal-fill" id="t-goal"></div></div>
+    <div class="stat"><span class="v" id="t-score">–</span><span class="k">score</span></div>
+    <div class="stat"><span class="v" id="t-streak">0</span><span class="k">clean blocks in a row</span></div>
+    <div class="stat"><span class="v" id="t-dist">0</span><span class="k">distractions</span></div>
+  </section>
+</main>
+
+<!-- Settings sheet -->
+<div class="scrim" id="scrim" hidden></div>
+<aside class="sheet" id="sheet" aria-label="Settings" aria-hidden="true">
+  <div class="sheet-head">
+    <h2>Settings</h2>
+    <button class="icon" id="close-settings" aria-label="Close settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+  </div>
+  <nav class="sheet-nav" id="sheet-nav">
+    <button data-sec="session" class="on">Session</button>
+    <button data-sec="camera">Camera</button>
+    <button data-sec="sites">Sites</button>
+    <button data-sec="penalties">Penalties</button>
+    <button data-sec="alerts">Alerts</button>
+    <button data-sec="keys">Shortcuts</button>
+  </nav>
+  <div class="sheet-body" id="sheet-body"></div>
+</aside>
+
+<!-- Calibration -->
+<div class="modal" id="cal" hidden role="dialog" aria-modal="true" aria-labelledby="cal-title">
+  <div class="cal-card">
+    <ol class="cal-steps" id="cal-steps">
+      <li data-t="screen">Screen</li><li data-t="book">Book</li><li data-t="away">Away</li>
+    </ol>
+    <h3 id="cal-title">Look at your screen</h3>
+    <p id="cal-body">Follow the dot with your eyes. Keep your head where it normally is.</p>
+    <div class="cal-ring"><svg viewBox="0 0 120 120"><circle cx="60" cy="60" r="52" class="track"/><circle cx="60" cy="60" r="52" class="prog" id="cal-prog"/></svg><span id="cal-count">5</span></div>
+    <div class="cal-actions">
+      <button class="secondary" id="cal-cancel">Cancel</button>
+      <button class="primary" id="cal-go">Start</button>
+    </div>
+  </div>
+  <div class="cal-dot" id="cal-dot" hidden></div>
+</div>
+
+<!-- Tour -->
+<div class="tour" id="tour" hidden>
+  <div class="tour-spot" id="tour-spot"></div>
+  <div class="tour-card" id="tour-card" role="dialog" aria-live="polite">
+    <p class="tour-step" id="tour-step"></p>
+    <h3 id="tour-title"></h3>
+    <p id="tour-text"></p>
+    <div class="tour-actions">
+      <button class="link" id="tour-skip">Skip</button>
+      <span class="grow"></span>
+      <button class="secondary" id="tour-back">Back</button>
+      <button class="primary" id="tour-next">Next</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast" role="status" hidden></div>
+<script src="app.js"></script>
+</body>
+</html>

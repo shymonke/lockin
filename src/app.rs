@@ -11,8 +11,11 @@ use crate::policy::{Action, Foreground, Gaze, Kind, Policy};
 use crate::pomodoro::{Event, Phase, Pomodoro};
 use crate::screen;
 use crate::vision::{self, CalTarget, Face, Objects};
+use crate::web;
 use eframe::egui;
+use serde_json::{json, Value};
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -35,17 +38,6 @@ pub struct Alert {
     pub remember: bool,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub enum Tab {
-    Timer,
-    Penalties,
-    Camera,
-    Sites,
-    Alerts,
-    Keys,
-    Stats,
-}
-
 #[derive(Default)]
 pub struct CamView {
     pub gaze: Option<Gaze>,
@@ -54,6 +46,14 @@ pub struct CamView {
     pub l2: Option<(Objects, f32)>,
     pub error: Option<String>,
     pub cameras: Vec<String>,
+}
+
+/// Guided calibration step in progress (shown in the dashboard).
+#[derive(Default)]
+pub struct CalState {
+    pub target: Option<CalTarget>,
+    pub progress: f32,
+    pub error: Option<String>,
 }
 
 pub struct App {
@@ -85,15 +85,14 @@ pub struct App {
     pub calc_open: bool,
     pub calc_min: bool,
     pub calc_spawn: Option<[f32; 2]>,
-    pub settings_open: bool,
-    pub tab: Tab,
-    pub tour: Option<usize>,
-    pub tour_scrolled: Option<usize>,
-    pub calibrating: Option<CalTarget>,
-    pub cal_msg: Option<String>,
-    pub test_camera: bool,
+    pub cal: CalState,
     pub click_through: bool,
-    pub new_site: [String; 3],
+    dash: web::Dashboard,
+    dash_shared: Arc<web::Shared>,
+    dash_rx: Receiver<Value>,
+    dash_was_open: bool,
+    last_publish: Instant,
+    first_tick: bool,
     seed: u64,
 }
 
@@ -112,10 +111,17 @@ impl App {
         let (atx, arx) = channel();
         audio::spawn(arx);
         let (ktx, krx) = channel();
-        hotkeys::spawn(ktx, Box::new(wake));
+        hotkeys::spawn(ktx, Box::new(wake.clone()));
+        let (dtx, dash_rx) = channel();
+        let dash_shared = Arc::new(web::Shared {
+            state: Mutex::new("{}".into()),
+            // TODO(merge): read the vision PreviewSlot once the eyes branch lands.
+            preview: Box::new(|| (json!({ "seq": null }).to_string(), None)),
+            actions: Mutex::new(dtx),
+            wake: Box::new(wake),
+        });
 
         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(7);
-        let first_run = !s.tour_done;
         let click_through = s.overlay_click_through;
         App {
             pomo: Pomodoro::new(&s),
@@ -150,15 +156,14 @@ impl App {
             calc_open: false,
             calc_min: false,
             calc_spawn: None,
-            settings_open: first_run,
-            tab: Tab::Timer,
-            tour: first_run.then_some(0),
-            tour_scrolled: None,
-            calibrating: None,
-            cal_msg: None,
-            test_camera: false,
+            cal: CalState::default(),
             click_through,
-            new_site: Default::default(),
+            dash: web::Dashboard::default(),
+            dash_shared,
+            dash_rx,
+            dash_was_open: false,
+            last_publish: Instant::now(),
+            first_tick: true,
             seed,
         }
     }
@@ -246,19 +251,152 @@ impl App {
     }
 
     pub fn calibrate(&mut self, target: CalTarget) {
-        self.calibrating = Some(target);
-        self.cal_msg = Some("Hold still for 2 seconds...".into());
+        self.cal = CalState { target: Some(target), progress: 0.0, error: None };
         let _ = self.vision.send(vision::Cmd::Calibrate { camera: self.s.camera_index, target });
     }
 
-    pub fn refresh_cameras(&mut self) {
-        self.cam.cameras = list_cameras();
+    pub fn open_dashboard(&mut self) {
+        self.dash.open(self.dash_shared.clone());
     }
 
-    pub fn start_tour(&mut self) {
-        self.settings_open = true;
-        self.tour = Some(0);
-        self.tour_scrolled = None;
+    /// The current phase has been running (or was penalised) rather than freshly set up.
+    pub fn pomo_started(&self) -> bool {
+        let mins = match self.pomo.phase {
+            Phase::Focus => self.s.focus_min,
+            Phase::ShortBreak => self.s.short_break_min,
+            Phase::LongBreak => self.s.long_break_min,
+        };
+        self.pomo.remaining < mins as f64 * 60.0 - 0.5 || self.pomo.block_added_secs > 0
+    }
+
+    fn set_click_through(&mut self, on: bool, ctx: &egui::Context) {
+        self.click_through = on;
+        self.s.overlay_click_through = on;
+        ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::MousePassthrough(on));
+    }
+
+    /// Merge a partial settings object from the dashboard; invalid values are ignored.
+    fn apply_patch(&mut self, patch: &Value, ctx: &egui::Context) {
+        let Value::Object(patch) = patch else { return };
+        let Ok(mut cur) = serde_json::to_value(&self.s) else { return };
+        for (k, v) in patch {
+            cur[k] = v.clone();
+        }
+        if let Ok(new) = serde_json::from_value::<Settings>(cur) {
+            let click = new.overlay_click_through;
+            let cam_changed = new.camera_index != self.s.camera_index;
+            self.s = new;
+            if click != self.click_through {
+                self.set_click_through(click, ctx);
+            }
+            if cam_changed {
+                self.cam.error = None;
+            }
+        }
+    }
+
+    fn dash_action(&mut self, v: Value, ctx: &egui::Context) {
+        match v["cmd"].as_str().unwrap_or_default() {
+            "toggle" => self.toggle_timer(),
+            "brb" => self.brb_or_back(),
+            "skip" => self.skip_phase(),
+            "reset" => self.reset_timer(),
+            "settings" => self.apply_patch(&v["patch"], ctx),
+            "calibrate" => {
+                if let Some(t) = cal_target(v["target"].as_str().unwrap_or_default()) {
+                    self.calibrate(t);
+                }
+            }
+            "cal-cancel" => self.cal = CalState::default(),
+            "cal-reset" => self.s.calibration = Default::default(),
+            "test-sound" => {
+                let _ = self.audio.send(audio::Cmd::Alarm { sound: self.s.sound.clone(), volume: self.s.volume, looping: false });
+            }
+            "stop-sound" => {
+                let _ = self.audio.send(audio::Cmd::Stop);
+            }
+            "preview-alert" => self.preview_alert(ctx),
+            "open-memes" => {
+                let dir = self.media_dir();
+                let _ = std::fs::create_dir_all(&dir);
+                let _ = std::process::Command::new("explorer").arg(&dir).spawn();
+            }
+            "pill-home" => self.s.overlay_pos = None,
+            "calc" => {
+                self.calc_open = true;
+                self.calc_min = false;
+                self.calc.open();
+            }
+            "quit" => {
+                self.shutdown();
+                std::process::exit(0);
+            }
+            "tour-done" => self.s.tour_done = true,
+            "dashboard-error" => self.cam.error = v["error"].as_str().map(|e| format!("Window failed: {e}")),
+            _ => {}
+        }
+    }
+
+    /// Snapshot for the dashboard (`/state`).
+    fn publish_state(&mut self) {
+        let goal = self.s.daily_goal_min;
+        let score = self.stats.score(goal);
+        let goal_streak = self.stats.goal_streak(goal);
+        let clean = self.stats.clean_streak;
+        let day = self.stats.today().clone();
+        let every = self.s.long_break_every.max(1);
+        let sounds: Vec<[String; 2]> = audio::BUILTINS
+            .iter()
+            .map(|b| [format!("b:{b}"), b.to_string()])
+            .chain(memes::media_files(&self.media_dir(), &["mp3", "wav"]).into_iter().map(|p| {
+                let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                [format!("f:{}", p.display()), name]
+            }))
+            .collect();
+        let mut meme_opts = vec![["Random".to_string(), "A cat that fits the moment".to_string()]];
+        meme_opts.extend(memes::BUILTINS.iter().map(|b| [format!("b:{b}"), b.to_string()]));
+        meme_opts.push(["UserFolder".into(), "From my memes folder".into()]);
+        meme_opts.push(["Off".into(), "No picture".into()]);
+        let state = json!({
+            "timer": {
+                "phase": match self.pomo.phase { Phase::Focus => "focus", Phase::ShortBreak => "short", Phase::LongBreak => "long" },
+                "remaining": self.pomo.remaining,
+                "running": self.pomo.running,
+                "started": self.pomo_started(),
+                "brb": self.pomo.brb,
+                "held": self.pomo.distracted_hold,
+                "added": self.pomo.block_added_secs,
+                "round": self.pomo.completed_focus % every + 1,
+                "every": every,
+            },
+            "alarm": self.alarm_active(),
+            "cam": {
+                "enabled": self.s.camera_enabled,
+                "error": self.cam.error,
+                "cameras": self.cam.cameras,
+                "calibrated": calibration_counts(&self.s.calibration),
+            },
+            "cal": {
+                "target": self.cal.target.map(cal_name),
+                "progress": self.cal.progress,
+                "error": self.cal.error,
+            },
+            "today": {
+                "focus_secs": day.focus_secs,
+                "goal_min": goal,
+                "score": score,
+                "blocks": day.blocks,
+                "distractions": day.distractions,
+                "clean_streak": clean,
+                "goal_streak": goal_streak,
+            },
+            "settings": self.s,
+            "tour_done": self.s.tour_done,
+            "hotkeys": hotkeys::ALL.iter().map(|(_, k, d)| [k.to_string(), d.to_string()]).collect::<Vec<_>>(),
+            "sounds": sounds,
+            "memes": meme_opts,
+        });
+        *self.dash_shared.state.lock().unwrap() = state.to_string();
     }
 
     // ---------------------------------------------------------------- alerts
@@ -414,6 +552,13 @@ impl App {
 
     pub fn tick(&mut self, ctx: &egui::Context) {
         let now = self.now();
+        if std::mem::take(&mut self.first_tick) && !self.s.tour_done {
+            // First run: open the main window, which starts the guided tour.
+            self.open_dashboard();
+        }
+        while let Ok(v) = self.dash_rx.try_recv() {
+            self.dash_action(v, ctx);
+        }
 
         while let Ok(k) = self.keys.try_recv() {
             match k {
@@ -426,12 +571,8 @@ impl App {
                 }
                 Hotkey::StartPause => self.toggle_timer(),
                 Hotkey::Brb => self.brb_or_back(),
-                Hotkey::Settings => self.settings_open = true,
-                Hotkey::ClickThrough => {
-                    self.click_through = !self.click_through;
-                    self.s.overlay_click_through = self.click_through;
-                    ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::MousePassthrough(self.click_through));
-                }
+                Hotkey::Settings => self.open_dashboard(),
+                Hotkey::ClickThrough => self.set_click_through(!self.click_through, ctx),
             }
         }
 
@@ -462,27 +603,28 @@ impl App {
                     }
                 }
                 vision::Msg::Calibrated(target, pose) => {
-                    self.calibrating = None;
+                    // A cancelled step's late result is dropped.
+                    if self.cal.target != Some(target) {
+                        continue;
+                    }
+                    self.cal = CalState::default();
                     match pose {
-                        Some(p) => {
-                            match target {
-                                CalTarget::Screen => self.s.calibration.screen = Some(p),
-                                CalTarget::Book => self.s.calibration.book = Some(p),
-                            }
-                            self.cal_msg = Some(format!("Saved {target:?} pose (pitch {:.2}, yaw {:.2}).", p.pitch, p.yaw));
-                        }
+                        Some(p) => match target {
+                            CalTarget::Screen => self.s.calibration.screen = Some(p),
+                            CalTarget::Book => self.s.calibration.book = Some(p),
+                        },
                         None => {
-                            self.cal_msg = Some(match target {
-                                CalTarget::Screen => "No face found. Sit in front of the camera, check it isn't covered, then retry.".into(),
-                                CalTarget::Book => {
-                                    "No face found. Tilt the screen so the camera still sees your face while you read, then retry.".into()
-                                }
+                            self.cal.error = Some(match target {
+                                CalTarget::Screen => "No face found. Sit in front of the camera, check it isn't covered, then try again.".into(),
+                                CalTarget::Book => "No face found. Tilt the screen so the camera still sees your face while you read, then try again.".into(),
                             });
                         }
                     }
                 }
                 vision::Msg::Error(e) => {
-                    self.calibrating = None;
+                    if self.cal.target.is_some() {
+                        self.cal = CalState { error: Some(e.clone()), ..Default::default() };
+                    }
                     self.cam.error = Some(e);
                 }
             }
@@ -554,9 +696,19 @@ impl App {
             self.last_stats_save = Instant::now();
         }
 
-        // Repaint cadence: animation only while an alert card is up, else once a second for the clock.
+        // Dashboard: publish a snapshot a few times a second while it is open.
+        let dash_open = self.dash.is_open();
+        if dash_open && (self.last_publish.elapsed().as_millis() >= 200 || !self.dash_was_open) {
+            self.publish_state();
+            self.last_publish = Instant::now();
+        }
+        self.dash_was_open = dash_open;
+
+        // Repaint cadence: animation only while an alert card is up, else often enough for the clocks.
         if self.alert.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(40));
+        } else if dash_open {
+            ctx.request_repaint_after(std::time::Duration::from_millis(200));
         } else if self.pomo.running || self.dirty_at.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(500));
         }
@@ -571,7 +723,7 @@ impl App {
                 self.policy.restart(now);
             }
         }
-        let want_cam = (self.s.camera_enabled && (focusing || (self.pomo.brb.is_some() && self.s.brb_auto_resume))) || self.test_camera;
+        let want_cam = self.s.camera_enabled && (focusing || (self.pomo.brb.is_some() && self.s.brb_auto_resume));
         let interval = match self.s.camera_mode {
             CameraMode::Always => 0.5,
             CameraMode::Interval => self.s.check_interval_secs.max(1) as f64,
@@ -605,4 +757,25 @@ impl App {
 fn list_cameras() -> Vec<String> {
     let _ = crate::camera::startup();
     crate::camera::list()
+}
+
+fn cal_target(name: &str) -> Option<CalTarget> {
+    match name {
+        "screen" => Some(CalTarget::Screen),
+        "book" => Some(CalTarget::Book),
+        // TODO(merge): "away" arrives with the eyes branch's CalTarget::Away.
+        _ => None,
+    }
+}
+
+fn cal_name(t: CalTarget) -> &'static str {
+    match t {
+        CalTarget::Screen => "screen",
+        CalTarget::Book => "book",
+    }
+}
+
+/// Samples collected per target, for the dashboard summary.
+fn calibration_counts(c: &crate::config::Calibration) -> Value {
+    json!({ "screen": c.screen.is_some() as u32, "book": c.book.is_some() as u32, "away": 0 })
 }

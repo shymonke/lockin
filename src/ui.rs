@@ -1,66 +1,85 @@
-//! Overlay pill (root window), alert card and the CAT calculator window.
+//! Native windows: the always-on-top timer pill, the alert card and the CAT calculator.
+//! Visual language matches the dashboard (assets/app.css): soft slate, regular weights, gentle fades.
 
 use crate::app::{App, Level};
 use crate::memes;
 use crate::policy::{Gaze, Kind};
 use crate::pomodoro::Phase;
-use crate::theme::{self, heavy};
+use crate::theme::{self, display, strong};
 use eframe::egui::{
-    self, pos2, vec2, Align2, Color32, CornerRadius, FontId, Rect, Sense, Shape, Stroke, StrokeKind, Ui, ViewportBuilder,
+    self, pos2, vec2, Align2, Color32, CornerRadius, FontId, Id, Rect, Sense, Shape, Stroke, StrokeKind, Ui, ViewportBuilder,
     ViewportCommand, ViewportId,
 };
 
-pub const PILL: egui::Vec2 = vec2(340.0, 64.0);
+pub const PILL: egui::Vec2 = vec2(330.0, 56.0);
 
 fn mmss(secs: f64) -> String {
     let s = secs.max(0.0).ceil() as u64;
     format!("{:02}:{:02}", s / 60, s % 60)
 }
 
-/// A round icon button painted by hand (no icon font needed).
+/// Colour that glides to `target` instead of snapping.
+fn soft_color(ctx: &egui::Context, id: Id, target: Color32) -> Color32 {
+    let ch = |i: usize, v: u8| ctx.animate_value_with_time(id.with(i), v as f32, 0.45) as u8;
+    Color32::from_rgb(ch(0, target.r()), ch(1, target.g()), ch(2, target.b()))
+}
+
+/// Round icon button with a fading hover wash.
 fn icon_button(ui: &mut Ui, rect: Rect, id: &str, tip: &str, paint: impl FnOnce(&egui::Painter, Rect, Color32)) -> bool {
     let r = ui.interact(rect, ui.scope_id().with(id), Sense::click()).on_hover_text(tip);
-    let fill = if r.is_pointer_button_down_on() {
-        theme::LIME.linear_multiply(0.45)
-    } else if r.hovered() {
-        Color32::from_rgb(56, 56, 72)
-    } else {
-        theme::CARD_HI
-    };
+    let hover = ui.ctx().animate_bool_with_time(r.id, r.hovered(), 0.15);
     let p = ui.painter();
-    p.circle_filled(rect.center(), rect.width() / 2.0, fill);
-    paint(p, rect.shrink(9.0), theme::TEXT);
+    let wash = if r.is_pointer_button_down_on() { theme::HOVER } else { theme::RAISED };
+    p.circle_filled(rect.center(), rect.width() / 2.0, wash.gamma_multiply(hover));
+    let ink = theme::MUTED.lerp_to_gamma(theme::TEXT, hover);
+    paint(p, rect.shrink(9.5), ink);
     r.clicked()
 }
 
+fn stroke(c: Color32) -> Stroke {
+    Stroke::new(1.6, c)
+}
 fn paint_play(p: &egui::Painter, r: Rect, c: Color32) {
-    p.add(Shape::convex_polygon(vec![r.left_top() + vec2(2.0, 0.0), r.left_bottom() + vec2(2.0, 0.0), pos2(r.right(), r.center().y)], c, Stroke::NONE));
+    let r = r.shrink(1.0);
+    p.add(Shape::convex_polygon(vec![r.left_top() + vec2(2.5, 0.0), r.left_bottom() + vec2(2.5, 0.0), pos2(r.right(), r.center().y)], c, Stroke::NONE));
 }
 fn paint_pause(p: &egui::Painter, r: Rect, c: Color32) {
-    let w = r.width() * 0.32;
-    p.rect_filled(Rect::from_min_size(r.left_top() + vec2(1.0, 0.0), vec2(w, r.height())), 2.0, c);
-    p.rect_filled(Rect::from_min_size(pos2(r.right() - w - 1.0, r.top()), vec2(w, r.height())), 2.0, c);
+    let r = r.shrink(1.0);
+    for x in [r.left() + r.width() * 0.3, r.right() - r.width() * 0.3] {
+        p.line_segment([pos2(x, r.top()), pos2(x, r.bottom())], Stroke::new(2.2, c));
+    }
+}
+/// Cup: stepping away.
+fn paint_cup(p: &egui::Painter, r: Rect, c: Color32) {
+    let body = Rect::from_min_max(pos2(r.left(), r.top() + r.height() * 0.3), pos2(r.right() - r.width() * 0.25, r.bottom()));
+    p.rect_stroke(body, CornerRadius { nw: 1, ne: 1, sw: 4, se: 4 }, stroke(c), StrokeKind::Inside);
+    p.circle_stroke(pos2(body.right() + 1.5, body.center().y - 1.0), r.width() * 0.17, stroke(c));
+    for x in [body.left() + body.width() * 0.35, body.left() + body.width() * 0.65] {
+        p.line_segment([pos2(x, r.top()), pos2(x, r.top() + r.height() * 0.18)], stroke(c));
+    }
+}
+/// Return arrow: I'm back.
+fn paint_back(p: &egui::Painter, r: Rect, c: Color32) {
+    let y = r.center().y + 2.0;
+    p.add(Shape::line(vec![pos2(r.right(), r.top() + 1.0), pos2(r.right(), y), pos2(r.left() + 1.0, y)], stroke(c)));
+    p.add(Shape::line(vec![pos2(r.left() + 5.0, y - 4.0), pos2(r.left() + 1.0, y), pos2(r.left() + 5.0, y + 4.0)], stroke(c)));
 }
 fn paint_calc(p: &egui::Painter, r: Rect, c: Color32) {
-    p.rect_stroke(r, 2.0, Stroke::new(1.6, c), StrokeKind::Inside);
-    let cell = r.width() / 3.0;
+    p.rect_stroke(r, 3.0, stroke(c), StrokeKind::Inside);
+    let line = r.top() + r.height() * 0.32;
+    p.line_segment([pos2(r.left() + 3.0, line), pos2(r.right() - 3.0, line)], stroke(c));
     for i in 0..3 {
-        for j in 1..3 {
-            p.circle_filled(pos2(r.left() + cell * (i as f32 + 0.5), r.top() + cell * (j as f32 + 0.5) - 1.0), 1.4, c);
+        for j in 0..2 {
+            let x = r.left() + r.width() * (0.27 + 0.23 * i as f32);
+            let y = r.top() + r.height() * (0.55 + 0.24 * j as f32);
+            p.circle_filled(pos2(x, y), 1.2, c);
         }
     }
-    p.line_segment([pos2(r.left() + 3.0, r.top() + cell * 0.6), pos2(r.right() - 3.0, r.top() + cell * 0.6)], Stroke::new(1.6, c));
 }
-fn paint_gear(p: &egui::Painter, r: Rect, c: Color32) {
-    let ctr = r.center();
-    let rad = r.width() * 0.3;
-    for i in 0..8 {
-        let a = i as f32 / 8.0 * std::f32::consts::TAU;
-        let d = vec2(a.cos(), a.sin());
-        p.line_segment([ctr + d * rad, ctr + d * (rad + 4.0)], Stroke::new(3.0, c));
-    }
-    p.circle_stroke(ctr, rad, Stroke::new(2.2, c));
-    p.circle_filled(ctr, 2.0, c);
+/// Window with a lens: open LockIn.
+fn paint_app(p: &egui::Painter, r: Rect, c: Color32) {
+    p.rect_stroke(r, 3.0, stroke(c), StrokeKind::Inside);
+    p.circle_stroke(r.center() + vec2(0.0, 1.0), r.width() * 0.2, stroke(c));
 }
 
 impl App {
@@ -68,43 +87,30 @@ impl App {
         let brain = self.s.brainrot;
         if let Some(left) = self.pomo.brb {
             return if left < 0.0 {
-                (theme::RED, format!("BRB OVERDUE {}", mmss(-left)))
+                (theme::ALERT, format!("Away {} too long", mmss(-left)))
             } else {
-                (theme::PURPLE, format!("BRB · BACK IN {}", mmss(left)))
+                (theme::BREAK, format!("Back in {}", mmss(left)))
             };
         }
         if self.alarm_active() {
-            return (theme::RED, if brain { "NOT LOCKED IN".into() } else { "DISTRACTED".into() });
+            return (theme::ALERT, if brain { "Not locked in".into() } else { "Distracted".into() });
         }
         match self.pomo.phase {
             Phase::ShortBreak | Phase::LongBreak => {
-                let label = if self.pomo.phase == Phase::LongBreak { "LONG BREAK" } else { "BREAK" };
-                (theme::BLUE, if self.pomo.running { label.into() } else { format!("{label} · PAUSED") })
+                let label = if self.pomo.phase == Phase::LongBreak { "Long break" } else { "Break" };
+                (theme::BREAK, if self.pomo.running { label.into() } else { format!("{label}, paused") })
             }
-            Phase::Focus if !self.pomo.running => (theme::MUTED, "PAUSED · CTRL+ALT+P".into()),
-            Phase::Focus => {
-                if self.pomo.distracted_hold {
-                    return (theme::AMBER, "TIMER HELD".into());
-                }
-                let what = if !self.s.camera_enabled {
-                    "FOCUS".into()
-                } else if self.cam.error.is_some() {
-                    "FOCUS · CAMERA ERROR".into()
-                } else {
-                    match self.cam.gaze {
-                        Some(Gaze::Screen) => if brain { "LOCKED IN · SCREEN" } else { "FOCUS · ON SCREEN" }.into(),
-                        Some(Gaze::Book) => if brain { "LOCKED IN · BOOK" } else { "FOCUS · ON BOOK" }.into(),
-                        Some(Gaze::Away) => "LOOKING AWAY".into(),
-                        Some(Gaze::Absent) => "NOT AT DESK".into(),
-                        None => "FOCUS · STARTING CAMERA".into(),
-                    }
-                };
-                let col = match self.cam.gaze {
-                    Some(Gaze::Away | Gaze::Absent) => theme::AMBER,
-                    _ => theme::LIME,
-                };
-                (col, what)
-            }
+            Phase::Focus if !self.pomo.running => (theme::MUTED, if self.pomo_started() { "Paused".into() } else { "Ready".into() }),
+            Phase::Focus if self.pomo.distracted_hold => (theme::CAUTION, "Timer waits for you".into()),
+            Phase::Focus if !self.s.camera_enabled => (theme::FOCUS, if brain { "Locked in".into() } else { "Focusing".into() }),
+            Phase::Focus if self.cam.error.is_some() => (theme::CAUTION, "Camera unavailable".into()),
+            Phase::Focus => match self.cam.gaze {
+                Some(Gaze::Screen) => (theme::GAZE, "On your screen".into()),
+                Some(Gaze::Book) => (theme::FOCUS, if brain { "Locked in on the book".into() } else { "On your book".into() }),
+                Some(Gaze::Away) => (theme::CAUTION, "Looking away".into()),
+                Some(Gaze::Absent) => (theme::CAUTION, "Not at your desk".into()),
+                None => (theme::MUTED, "Starting the camera".into()),
+            },
         }
     }
 
@@ -118,7 +124,7 @@ impl App {
         let info = ctx.input(|i| i.viewport().clone());
         match (self.s.overlay_pos, info.monitor_size, info.outer_rect) {
             (None, Some(m), _) => {
-                let p = pos2((m.x - PILL.x) / 2.0, 14.0);
+                let p = pos2((m.x - PILL.x) / 2.0, 12.0);
                 ctx.send_viewport_cmd(ViewportCommand::OuterPosition(p));
                 self.s.overlay_pos = Some([p.x, p.y]);
             }
@@ -132,51 +138,41 @@ impl App {
         if bg.drag_started() {
             ctx.send_viewport_cmd(ViewportCommand::StartDrag);
         }
-        if bg.secondary_clicked() {
-            self.settings_open = true;
+        if bg.secondary_clicked() || bg.double_clicked() {
+            self.open_dashboard();
         }
 
-        let (dot, label) = self.status();
+        let (tone, label) = self.status();
+        let tone = soft_color(&ctx, Id::unique("pill-tone"), tone);
+        let edge = soft_color(&ctx, Id::unique("pill-edge"), if self.alarm_active() { theme::ALERT.gamma_multiply(0.55) } else { theme::LINE });
         let p = ui.painter();
-        let border = if self.alarm_active() {
-            let t = ctx.input(|i| i.time) as f32;
-            theme::RED.linear_multiply(0.6 + 0.4 * (t * 6.0).sin().abs())
-        } else if self.s.brainrot {
-            theme::PINK
-        } else {
-            theme::LINE
-        };
-        p.rect_filled(rect, CornerRadius::same(30), Color32::from_rgba_unmultiplied(14, 14, 18, 240));
-        p.rect_stroke(rect, CornerRadius::same(30), Stroke::new(1.5, border), StrokeKind::Inside);
-        let dc = pos2(rect.left() + 26.0, rect.center().y);
-        p.circle_filled(dc, 11.0, dot.linear_multiply(0.18));
-        p.circle_filled(dc, 6.0, dot);
+        p.rect_filled(rect, CornerRadius::same(255), Color32::from_rgba_unmultiplied(27, 31, 39, 245));
+        p.rect_stroke(rect, CornerRadius::same(255), Stroke::new(1.0, edge), StrokeKind::Inside);
+        let dc = pos2(rect.left() + 24.0, rect.center().y);
+        p.circle_filled(dc, 9.0, tone.gamma_multiply(0.16));
+        p.circle_filled(dc, 4.5, tone);
 
-        let shown = self.pomo.remaining;
-        p.text(pos2(rect.left() + 46.0, rect.top() + 7.0), Align2::LEFT_TOP, mmss(shown), heavy(27.0), theme::TEXT);
+        p.text(pos2(rect.left() + 42.0, rect.center().y + 1.0), Align2::LEFT_BOTTOM, mmss(self.pomo.remaining), display(25.0), theme::TEXT);
+        let mut sub = label;
         if self.pomo.block_added_secs > 0 && self.pomo.phase == Phase::Focus {
-            // Compact penalty chip beside the clock, clear of the buttons.
-            let m = self.pomo.block_added_secs / 60;
-            let s = self.pomo.block_added_secs % 60;
-            let chip = if s == 0 { format!("+{m}m") } else { format!("+{m}:{s:02}") };
-            p.text(pos2(rect.left() + 134.0, rect.top() + 11.0), Align2::LEFT_TOP, chip, heavy(11.0), theme::RED);
+            sub = format!("{sub}   +{}m", self.pomo.block_added_secs.div_ceil(60));
         }
-        p.text(pos2(rect.left() + 47.0, rect.bottom() - 8.0), Align2::LEFT_BOTTOM, label, FontId::proportional(10.5), theme::MUTED);
+        p.text(pos2(rect.left() + 43.0, rect.center().y + 2.0), Align2::LEFT_TOP, sub, FontId::proportional(11.5), theme::MUTED);
 
         // Buttons, right to left.
-        let size = 34.0;
+        let size = 32.0;
         let cy = rect.center().y;
-        let mut x = rect.right() - 12.0 - size / 2.0;
+        let mut x = rect.right() - 10.0 - size / 2.0;
         let mut next = || {
             let r = Rect::from_center_size(pos2(x, cy), vec2(size, size));
-            x -= size + 6.0;
+            x -= size + 2.0;
             r
         };
-        let (gear, calc, brb, play) = (next(), next(), next(), next());
-        if icon_button(ui, gear, "gear", "Settings (Ctrl+Alt+O, or right-click the pill)", paint_gear) {
-            self.settings_open = !self.settings_open;
+        let (app, calc, brb, play) = (next(), next(), next(), next());
+        if icon_button(ui, app, "app", "Open LockIn (Ctrl+Alt+O)", paint_app) {
+            self.open_dashboard();
         }
-        if icon_button(ui, calc, "calc", "CAT calculator (Ctrl+Alt+C)", paint_calc) {
+        if icon_button(ui, calc, "calc", "Calculator (Ctrl+Alt+C)", paint_calc) {
             self.calc_open = !self.calc_open;
             if self.calc_open {
                 self.calc.open();
@@ -184,17 +180,20 @@ impl App {
             }
         }
         let back = self.pomo.brb.is_some() || self.alarm_active();
-        let brb_tip = if back { "I'm back (Ctrl+Alt+B)" } else { "BRB pause (Ctrl+Alt+B)" };
-        let brb_enabled = back || self.pomo.focusing();
-        if icon_button(ui, brb, "brb", brb_tip, |p, r, c| {
-            let (txt, col) = if back { ("BACK", theme::LIME) } else { ("BRB", if brb_enabled { c } else { theme::MUTED }) };
-            p.text(r.center(), Align2::CENTER_CENTER, txt, heavy(if back { 9.5 } else { 11.0 }), col);
-        }) && brb_enabled
+        let can_step_away = self.pomo.focusing();
+        let tip = if back { "I'm back (Ctrl+Alt+B)" } else { "Step away without alarms (Ctrl+Alt+B)" };
+        if icon_button(ui, brb, "brb", tip, |p, r, c| {
+            if back {
+                paint_back(p, r, theme::FOCUS)
+            } else {
+                paint_cup(p, r, if can_step_away { c } else { c.gamma_multiply(0.4) })
+            }
+        }) && (back || can_step_away)
         {
             self.brb_or_back();
         }
         let running = self.pomo.running;
-        if icon_button(ui, play, "play", "Start / pause (Ctrl+Alt+P)", |p, r, c| if running { paint_pause(p, r, c) } else { paint_play(p, r, c) }) {
+        if icon_button(ui, play, "play", "Start or pause (Ctrl+Alt+P)", |p, r, c| if running { paint_pause(p, r, c) } else { paint_play(p, r, c) }) {
             self.toggle_timer();
         }
     }
@@ -202,13 +201,13 @@ impl App {
     pub fn alert_window(&mut self, ctx: &egui::Context) {
         let Some(alert) = &self.alert else { return };
         let has_meme = alert.cat.is_some() || self.user_meme.is_some();
-        let size = vec2(460.0, if has_meme { 430.0 } else { 200.0 });
+        let size = vec2(440.0, if has_meme { 410.0 } else { 196.0 });
         let monitor = ctx.input_for(ViewportId::ROOT, |i| i.viewport().monitor_size).unwrap_or(vec2(1920.0, 1080.0));
         let level = alert.level;
         let builder = ViewportBuilder::default()
             .with_title("LockIn alert")
             .with_inner_size(size)
-            .with_position(pos2((monitor.x - size.x) / 2.0, 90.0))
+            .with_position(pos2((monitor.x - size.x) / 2.0, 84.0))
             .with_decorations(false)
             .with_transparent(true)
             .with_resizable(false)
@@ -222,77 +221,74 @@ impl App {
     fn alert_ui(&mut self, ui: &mut Ui) {
         let Some(alert) = &mut self.alert else { return };
         let ctx = ui.ctx().clone();
-        let rect = ui.max_rect().shrink(4.0);
+        let t = alert.opened.elapsed().as_secs_f32();
+        // Fade and settle in.
+        let a = (t / 0.25).min(1.0);
+        let ease = 1.0 - (1.0 - a).powi(3);
+        ui.multiply_opacity(ease);
+        let rect = ui.max_rect().shrink(4.0).translate(vec2(0.0, (1.0 - ease) * 10.0));
         let bg = ui.interact(rect, ui.scope_id().with("alert-bg"), Sense::click_and_drag());
         if bg.drag_started() {
             ctx.send_viewport_cmd(ViewportCommand::StartDrag);
         }
-        let accent = match alert.level {
-            Level::Alarm => theme::RED,
-            Level::Warn => theme::AMBER,
-            Level::Ask => theme::BLUE,
-            Level::Info => theme::LIME,
+        let (accent, tag) = match alert.level {
+            Level::Alarm => (theme::ALERT, "Alarm"),
+            Level::Warn => (theme::CAUTION, "Heads up"),
+            Level::Ask => (theme::GAZE, "Quick question"),
+            Level::Info => (theme::FOCUS, "LockIn"),
         };
-        let t = alert.opened.elapsed().as_secs_f32();
         let p = ui.painter().clone();
-        p.rect_filled(rect, CornerRadius::same(22), theme::CARD);
-        p.rect_stroke(rect, CornerRadius::same(22), Stroke::new(2.0, accent.linear_multiply(0.8)), StrokeKind::Inside);
-        p.rect_filled(Rect::from_min_size(rect.min + vec2(22.0, 0.0), vec2(rect.width() - 44.0, 5.0)), 3.0, accent);
+        p.rect_filled(rect, CornerRadius::same(20), theme::SURFACE);
+        p.rect_stroke(rect, CornerRadius::same(20), Stroke::new(1.0, theme::LINE), StrokeKind::Inside);
 
-        let mut y = rect.top() + 18.0;
-        let meme_rect = Rect::from_min_size(pos2(rect.left() + 18.0, y), vec2(rect.width() - 36.0, 190.0));
+        let mut y = rect.top() + 16.0;
+        let meme_rect = Rect::from_min_size(pos2(rect.left() + 16.0, y), vec2(rect.width() - 32.0, 180.0));
         if let Some(m) = &self.user_meme {
             m.paint(&p, meme_rect, t);
-            y += 202.0;
+            y += 196.0;
         } else if let Some(cat) = alert.cat {
             memes::paint_cat(&p, meme_rect, t, cat);
-            y += 202.0;
+            y += 196.0;
         }
-        let tag = match alert.level {
-            Level::Alarm => "ALARM",
-            Level::Warn => "WARNING",
-            Level::Ask => "QUICK CHECK",
-            Level::Info => "LOCKIN",
-        };
-        p.text(pos2(rect.left() + 24.0, y), Align2::LEFT_TOP, tag, FontId::proportional(11.0), accent);
-        y += 16.0;
-        let title = ctx.fonts_mut(|f| f.layout(alert.line.title.clone(), heavy(25.0), theme::TEXT, rect.width() - 48.0));
+        p.circle_filled(pos2(rect.left() + 28.0, y + 8.0), 3.5, accent);
+        p.text(pos2(rect.left() + 38.0, y + 8.0), Align2::LEFT_CENTER, tag, FontId::proportional(12.5), theme::MUTED);
+        y += 22.0;
+        let w = rect.width() - 48.0;
+        let title = ctx.fonts_mut(|f| f.layout(alert.line.title.clone(), strong(20.0), theme::TEXT, w));
         let th = title.size().y;
         p.galley(pos2(rect.left() + 24.0, y), title, theme::TEXT);
-        y += th + 4.0;
-        let body = ctx.fonts_mut(|f| f.layout(alert.line.body.clone(), FontId::proportional(15.0), theme::MUTED, rect.width() - 48.0));
+        y += th + 2.0;
+        let body = ctx.fonts_mut(|f| f.layout(alert.line.body.clone(), FontId::proportional(14.0), theme::MUTED, w));
         let bh = body.size().y;
         p.galley(pos2(rect.left() + 24.0, y), body, theme::MUTED);
         y += bh + 8.0;
         if alert.level == Level::Alarm {
             let mut chips = Vec::new();
             if alert.added_secs > 0 {
-                chips.push(format!("+{} focus time", mmss(alert.added_secs as f64)));
+                chips.push(format!("+{} min focus", alert.added_secs.div_ceil(60)));
             }
             if self.s.penalty_score && alert.kind.as_ref().is_some_and(|k| *k != Kind::BrbOverdue || self.s.penalty_brb_overdue) {
                 chips.push(format!("-{} score", self.s.penalty_score_points));
             }
             if self.s.penalty_pause_timer && self.pomo.distracted_hold {
-                chips.push("timer held".into());
+                chips.push("timer waits for you".into());
             }
             let mut x = rect.left() + 24.0;
             for c in chips {
-                let g = ctx.fonts_mut(|f| f.layout_no_wrap(c, FontId::proportional(12.5), theme::RED));
-                let r = Rect::from_min_size(pos2(x, y), g.size() + vec2(16.0, 6.0));
-                p.rect_filled(r, 10.0, theme::RED.linear_multiply(0.18));
-                p.galley(r.min + vec2(8.0, 3.0), g, theme::RED);
+                let g = ctx.fonts_mut(|f| f.layout_no_wrap(c, FontId::proportional(12.0), theme::ALERT));
+                let r = Rect::from_min_size(pos2(x, y), g.size() + vec2(18.0, 8.0));
+                p.rect_filled(r, CornerRadius::same(255), theme::ALERT.gamma_multiply(0.14));
+                p.galley(r.min + vec2(9.0, 4.0), g, theme::ALERT);
                 x = r.right() + 6.0;
             }
         }
 
         // Buttons.
-        let btn_rect = Rect::from_min_max(pos2(rect.left() + 22.0, rect.bottom() - 58.0), pos2(rect.right() - 22.0, rect.bottom() - 16.0));
+        let btn_rect = Rect::from_min_max(pos2(rect.left() + 20.0, rect.bottom() - 56.0), pos2(rect.right() - 20.0, rect.bottom() - 16.0));
         let mut ui = ui.new_child(egui::UiBuilder::new().max_rect(btn_rect).layout(egui::Layout::left_to_right(egui::Align::Center)));
-        let big = |text: &str, fill: Color32, dark: bool| {
-            egui::Button::new(egui::RichText::new(text).font(heavy(15.0)).color(if dark { theme::INK } else { theme::TEXT }))
-                .fill(fill)
-                .corner_radius(12)
-                .min_size(vec2(0.0, 40.0))
+        let button = |text: &str, primary: bool| {
+            let (fill, ink) = if primary { (theme::TEXT, theme::BG) } else { (theme::RAISED, theme::TEXT) };
+            egui::Button::new(egui::RichText::new(text).font(strong(14.0)).color(ink)).fill(fill).corner_radius(255).min_size(vec2(0.0, 38.0))
         };
         let level = alert.level;
         let site = match &alert.kind {
@@ -301,23 +297,23 @@ impl App {
         };
         match level {
             Level::Alarm => {
-                if ui.add(big(if self.s.brainrot { "I'M LOCKED IN" } else { "I'M BACK" }, theme::LIME, true)).clicked() {
+                if ui.add(button(if self.s.brainrot { "I'm locked in" } else { "I'm back" }, true)).clicked() {
                     self.im_back();
                 }
                 if let Some(d) = site {
-                    if ui.add(big("It's for study", theme::CARD_HI, false)).clicked() {
+                    if ui.add(button("It's for study", false)).clicked() {
                         self.policy.session_allowed.insert(d);
                         self.im_back();
                     }
                 }
             }
             Level::Warn => {
-                if ui.add(big("Got it", theme::AMBER, true)).clicked() {
+                if ui.add(button("Got it", true)).clicked() {
                     self.alert = None;
                     self.user_meme = None;
                 }
                 if let Some(d) = site {
-                    if ui.add(big("It's for study", theme::CARD_HI, false)).clicked() {
+                    if ui.add(button("It's for study", false)).clicked() {
                         self.policy.session_allowed.insert(d);
                         self.alert = None;
                         self.user_meme = None;
@@ -325,19 +321,22 @@ impl App {
                 }
             }
             Level::Ask => {
-                if ui.add(big("Studying", theme::LIME, true)).clicked() {
+                if ui.add(button("For study", true)).clicked() {
                     self.answer_ask(true);
-                } else if ui.add(big("Distraction", theme::RED, false)).clicked() {
+                } else if ui.add(button("Distraction", false)).clicked() {
                     self.answer_ask(false);
                 } else if let Some(a) = &mut self.alert {
                     ui.checkbox(&mut a.remember, "Remember");
                 }
             }
             Level::Info => {
-                if ui.add(big("OK", theme::LIME, true)).clicked() {
+                if ui.add(button("OK", true)).clicked() {
                     self.alert = None;
                 }
             }
+        }
+        if t < 0.3 {
+            ctx.request_repaint();
         }
     }
 
@@ -404,7 +403,7 @@ impl App {
             let r = Rect::from_center_size(pos2(title.left() + x, title.center().y), vec2(22.0, 22.0));
             let resp = ui.interact(r, ui.scope_id().with(id), Sense::click());
             ui.painter().rect_stroke(r, 4.0, Stroke::new(1.0, Color32::from_white_alpha(128)), StrokeKind::Inside);
-            ui.painter().text(r.center(), Align2::CENTER_CENTER, label, heavy(13.0), Color32::WHITE);
+            ui.painter().text(r.center(), Align2::CENTER_CENTER, label, strong(13.0), Color32::WHITE);
             resp.clicked()
         };
         if tb(ui, w - 50.0, "min", if self.calc_min { "□" } else { "_" }) {
@@ -458,7 +457,7 @@ impl App {
         screen(&p, body.top(), &expr, Color32::from_rgb(0x33, 0x33, 0x33));
         let r2 = screen(&p, body.top() + 37.0, &disp, Color32::BLACK);
         if mem {
-            p.text(r2.left_top() + vec2(5.0, 2.0), Align2::LEFT_TOP, "M", heavy(12.0), Color32::from_rgb(0x44, 0x44, 0x44));
+            p.text(r2.left_top() + vec2(5.0, 2.0), Align2::LEFT_TOP, "M", strong(12.0), Color32::from_rgb(0x44, 0x44, 0x44));
         }
 
         // (id, label, col, row, colspan, rowspan, style) matching the CSS grid auto-placement.
@@ -479,9 +478,9 @@ impl App {
             let resp = ui.interact(rect, ui.scope_id().with(id), Sense::click());
             let down = resp.is_pointer_button_down_on();
             let (fill, edge, text_col, font) = match style {
-                1 => (RED.0, RED.1, Color32::WHITE, heavy(12.0)),
-                2 => (GREEN.0, GREEN.1, Color32::WHITE, heavy(20.0)),
-                _ => (if resp.hovered() { KEY_HOVER } else { KEY }, EDGE, KEY_TEXT, heavy(12.0)),
+                1 => (RED.0, RED.1, Color32::WHITE, strong(12.0)),
+                2 => (GREEN.0, GREEN.1, Color32::WHITE, strong(20.0)),
+                _ => (if resp.hovered() { KEY_HOVER } else { KEY }, EDGE, KEY_TEXT, strong(12.0)),
             };
             let bottom = if down { 1.0 } else { 3.0 };
             p.rect_filled(rect, 4.0, edge);

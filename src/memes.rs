@@ -69,7 +69,7 @@ pub fn paint_cat(p: &Painter, rect: Rect, t: f32, style: CatStyle) {
             }
         }
         CatStyle::Alarm => {
-            let flash = if (t * 4.0) as i32 % 2 == 0 { theme::RED } else { Color32::from_rgb(120, 20, 40) };
+            let flash = if (t * 4.0) as i32 % 2 == 0 { theme::ALERT } else { Color32::from_rgb(120, 20, 40) };
             clip.rect_filled(rect, 14.0, flash.linear_multiply(0.55));
         }
         CatStyle::Sleepy => {
@@ -137,7 +137,7 @@ pub fn paint_cat(p: &Painter, rect: Rect, t: f32, style: CatStyle) {
                 clip.line_segment([e + vec2(-18.0, -10.0 + dir * 4.0) * s, e + vec2(18.0, -10.0 - dir * 4.0) * s], Stroke::new(4.0 * s, FUR_DARK));
             }
             let dots = ((t * 2.0) as usize % 4).max(1);
-            clip.text(at(70.0, -78.0), egui::Align2::CENTER_CENTER, ".".repeat(dots), theme::heavy(30.0 * s), Color32::WHITE);
+            clip.text(at(70.0, -78.0), egui::Align2::CENTER_CENTER, ".".repeat(dots), theme::strong(30.0 * s), Color32::WHITE);
         }
         CatStyle::Sleepy => {
             for e in [eye_l, eye_r] {
@@ -152,7 +152,7 @@ pub fn paint_cat(p: &Painter, rect: Rect, t: f32, style: CatStyle) {
                 let phase = (t * 0.6 + i as f32 / 3.0) % 1.0;
                 let pos = at(60.0 + phase * 40.0, -60.0 - phase * 70.0);
                 let col = Color32::from_rgba_unmultiplied(220, 220, 255, ((1.0 - phase) * 255.0) as u8);
-                clip.text(pos, egui::Align2::CENTER_CENTER, "z", theme::heavy((14.0 + phase * 16.0) * s), col);
+                clip.text(pos, egui::Align2::CENTER_CENTER, "z", theme::strong((14.0 + phase * 16.0) * s), col);
             }
         }
         CatStyle::Alarm => {
@@ -164,7 +164,7 @@ pub fn paint_cat(p: &Painter, rect: Rect, t: f32, style: CatStyle) {
                 let a = i as f32 / 6.0 * std::f32::consts::TAU + t;
                 let r0 = 100.0 * s;
                 let dir = vec2(a.cos(), a.sin());
-                clip.line_segment([h + dir * r0, h + dir * (r0 + 14.0 * s)], Stroke::new(4.0 * s, theme::AMBER));
+                clip.line_segment([h + dir * r0, h + dir * (r0 + 14.0 * s)], Stroke::new(4.0 * s, theme::CAUTION));
             }
         }
     }
