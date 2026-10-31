@@ -11,14 +11,14 @@
   <div class="brand"><span class="mark" aria-hidden="true"></span>LockIn</div>
   <div class="bar-actions">
     <label class="cam-select" title="Camera">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7.5h10.5a1.5 1.5 0 0 1 1.5 1.5v6a1.5 1.5 0 0 1-1.5 1.5H4A1.5 1.5 0 0 1 2.5 15V9A1.5 1.5 0 0 1 4 7.5Zm12 3 5-2.5v8l-5-2.5"/></svg>
+      <i class="ph" aria-hidden="true">&#xe9b2;</i>
       <select id="camera" aria-label="Camera"></select>
     </label>
     <button class="icon" id="help" title="Show me around" aria-label="Show me around">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.6 9.3a2.5 2.5 0 1 1 3.4 2.3c-.6.3-1 .8-1 1.5v.4"/><circle cx="12" cy="16.8" r=".6" class="fill"/></svg>
+      <i class="ph" aria-hidden="true">&#xe3e8;</i>
     </button>
     <button class="icon" id="open-settings" title="Settings" aria-label="Settings">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg>
+      <i class="ph" aria-hidden="true">&#xe434;</i>
     </button>
   </div>
 </header>
@@ -30,7 +30,7 @@
       <p id="stage-empty-text">Starting your camera…</p>
     </div>
     <div class="chip" id="chip" data-tone="idle"><span class="dot"></span><span id="chip-text">Waiting for the camera</span><span class="conf" id="chip-conf"></span></div>
-    <button class="ghost stage-cal" id="calibrate">Calibrate</button>
+    <button class="ghost stage-cal" id="calibrate"><i class="ph" aria-hidden="true">&#xe1d6;</i>Calibrate</button>
     <dl class="readout" id="readout" aria-label="Live measurements">
       <div><dt>Head</dt><dd id="r-head">–</dd></div>
       <div><dt>Eyes</dt><dd id="r-eyes">–</dd></div>
@@ -44,10 +44,10 @@
       <div class="phase"><span id="phase">Focus</span><span class="sep"></span><span id="round"></span><span class="penalty" id="penalty"></span></div>
     </div>
     <div class="session-actions">
-      <button class="primary" id="start">Start focus</button>
-      <button class="secondary" id="brb" title="Ctrl+Alt+B">Step away</button>
+      <button class="primary" id="start"><i class="ph lead" aria-hidden="true">&#xe3d0;</i><span>Start focus</span></button>
+      <button class="secondary" id="brb" title="Ctrl+Alt+B"><i class="ph lead" aria-hidden="true">&#xe1c2;</i><span>Step away</span></button>
       <button class="icon quiet" id="skip" title="Skip to next phase" aria-label="Skip to next phase">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6.5v11l8-5.5zM17.5 6.5v11"/></svg>
+        <i class="ph" aria-hidden="true">&#xe5a6;</i>
       </button>
     </div>
   </section>
@@ -66,7 +66,7 @@
 <aside class="sheet" id="sheet" aria-label="Settings" aria-hidden="true">
   <div class="sheet-head">
     <h2>Settings</h2>
-    <button class="icon" id="close-settings" aria-label="Close settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+    <button class="icon" id="close-settings" aria-label="Close settings"><i class="ph" aria-hidden="true">&#xe4f6;</i></button>
   </div>
   <nav class="sheet-nav" id="sheet-nav">
     <button data-sec="session" class="on">Session</button>
@@ -103,6 +103,7 @@
     <p class="tour-step" id="tour-step"></p>
     <h3 id="tour-title"></h3>
     <p id="tour-text"></p>
+    <div class="tour-keys" id="tour-keys"></div>
     <div class="tour-actions">
       <button class="link" id="tour-skip">Skip</button>
       <span class="grow"></span>

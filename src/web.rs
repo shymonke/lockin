@@ -23,6 +23,7 @@ use wry::{Rect, WebContext, WebView, WebViewBuilder, WebViewBuilderExtWindows};
 static INDEX: &str = include_str!("../assets/index.html");
 static CSS: &str = include_str!("../assets/app.css");
 static JS: &str = include_str!("../assets/app.js");
+static ICON_FONT: &[u8] = crate::theme::ICON_FONT;
 
 /// Keep WebView2 small: one renderer, no GPU process (the page is a canvas at ~15 fps, software
 /// raster is plenty), no background services. wry's defaults (no mini menu / SmartScreen) kept.
@@ -150,6 +151,7 @@ fn serve(shared: &Shared, req: &Request<Vec<u8>>) -> Response<Cow<'static, [u8]>
         "/" | "/index.html" => respond("text/html; charset=utf-8", asset("index.html", INDEX)),
         "/app.css" => respond("text/css; charset=utf-8", asset("app.css", CSS)),
         "/app.js" => respond("text/javascript; charset=utf-8", asset("app.js", JS)),
+        "/fonts/phosphor-lockin.ttf" => respond("font/ttf", Cow::Borrowed(ICON_FONT)),
         "/state" => respond("application/json", Cow::Owned(shared.state.lock().unwrap().clone().into_bytes())),
         "/preview" => respond("application/json", Cow::Owned((shared.preview)(false).0.into_bytes())),
         "/frame" => match (shared.preview)(true).1 {

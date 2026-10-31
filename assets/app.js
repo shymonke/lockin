@@ -59,9 +59,10 @@ function render() {
     : focus ? (t.held ? "Focus, paused while distracted" : "Focus") : t.phase === "long" ? "Long break" : "Short break";
   $("#round").textContent = focus ? `Round ${t.round} of ${t.every}` : "";
   $("#penalty").textContent = t.added > 0 && focus ? `+${mins(t.added)} penalty` : "";
-  $("#start").textContent = t.running ? "Pause" : (t.started ? "Resume" : (focus ? "Start focus" : "Start break"));
+  setButton($("#start"), t.running ? "pause" : "play", t.running ? "Pause" : (t.started ? "Resume" : (focus ? "Start focus" : "Start break")));
   const brb = $("#brb");
-  brb.textContent = t.brb !== null || S.alarm ? "I'm back" : "Step away";
+  const back = t.brb !== null || S.alarm;
+  setButton(brb, back ? "back" : "coffee", back ? "I'm back" : "Step away");
   brb.disabled = !(t.brb !== null || S.alarm || (t.running && focus));
   brb.title = t.brb !== null || S.alarm ? "Ctrl+Alt+B" : `Pause for ${Math.round(S.settings.brb_secs / 60 * 10) / 10} min without alarms (Ctrl+Alt+B)`;
 
@@ -83,6 +84,14 @@ function render() {
   cal.update();
   if (sheet.open) sheet.refresh();
   if (!drawing) updateChip();
+}
+
+// Phosphor glyphs (assets/fonts/phosphor-lockin.ttf).
+const GLYPH = { play: "\ue3d0", pause: "\ue39e", coffee: "\ue1c2", back: "\ue08a", x: "\ue4f6" };
+function setButton(el, glyph, text) {
+  const i = el.querySelector(".ph"), span = el.querySelector("span");
+  if (i.textContent !== GLYPH[glyph]) i.textContent = GLYPH[glyph];
+  if (span.textContent !== text) span.textContent = text;
 }
 
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
@@ -305,7 +314,7 @@ $("#camera").onchange = (e) => send("settings", { patch: { camera_index: Number(
 
 /* ------------------------------------------------------------ settings sheet */
 
-const ICON_X = `<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg>`;
+const ICON_X = `<i class="ph" aria-hidden="true">${GLYPH.x}</i>`;
 
 const sheet = {
   open: false,
@@ -454,7 +463,9 @@ const SECTIONS = {
     <div class="group"><h4>Shortcuts</h4><p class="help">Work anywhere in Windows.</p>
       <div class="keys">${S.hotkeys.map(([k, d]) => `<kbd>Ctrl + Alt + ${esc(k)}</kbd><span>${esc(d)}</span>`).join("")}</div>
     </div>
-    <div class="group">${sw("overlay_click_through", "Clicks pass through the timer bar", "Turn off again with Ctrl+Alt+L")}
+    <div class="group"><h4>Timer bar</h4>
+      <div class="row"><label for="f-pill_opacity">Opacity<small>It turns fully visible while your mouse is over it</small></label><input id="f-pill_opacity" data-k="pill_opacity" type="range" min="0.3" max="1" step="0.02"></div>
+      ${sw("overlay_click_through", "Clicks pass through the timer bar", "Turn off again with Ctrl+Alt+L")}
       <div class="btns"><button class="secondary" data-act="pill-home">Move the timer bar back to the top</button><button class="secondary" data-act="calc">Open the calculator</button></div>
     </div>
     <div class="group"><div class="btns"><button class="secondary" data-act="quit">Quit LockIn</button></div></div>`,
@@ -544,24 +555,60 @@ const CAL = {
   away: ["Look away", "Look around the room, at the wall, out of the window. Not at the desk."],
 };
 const ORDER = ["screen", "book", "away"];
-const DOTS = [[.5, .45], [.15, .15], [.85, .15], [.85, .8], [.15, .8], [.5, .45]];
+const DOTS = [[.5, .45], [.14, .16], [.86, .16], [.86, .82], [.14, .82], [.5, .45]];
+// Rising C-major pentatonic, one note per dot; ticks for the reading/away steps.
+const NOTES = [523.25, 587.33, 659.25, 783.99, 880, 1046.5];
+const BEAT = 1000, MOVE = 420;
+
+let audio = null;
+function tone(freq, dur = 0.24, gain = 0.12) {
+  const vol = S ? S.settings.volume : 0.8;
+  if (!vol || reduced) return;
+  audio = audio || new AudioContext();
+  const t0 = audio.currentTime;
+  const o = audio.createOscillator(), g = audio.createGain();
+  o.type = "sine";
+  o.frequency.value = freq;
+  g.gain.setValueAtTime(0, t0);
+  g.gain.linearRampToValueAtTime(gain * vol, t0 + 0.012);
+  g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+  o.connect(g).connect(audio.destination);
+  o.start(t0);
+  o.stop(t0 + dur + 0.03);
+}
+const chord = () => [523.25, 659.25, 783.99].forEach((f, i) => setTimeout(() => tone(f, 0.5, 0.09), i * 70));
+
+// Restart a CSS animation class so it plays again on every beat.
+function pulse(el, cls) {
+  el.classList.remove(cls);
+  void el.offsetWidth;
+  el.classList.add(cls);
+}
 
 const cal = {
   step: 0,
   running: false,
+  timers: [],
   open() {
     this.step = 0;
     this.running = false;
     $("#cal").hidden = false;
+    paused = true; // nothing animates behind the modal
     this.paint();
   },
   close() {
     $("#cal").hidden = true;
     $("#cal").classList.remove("dotting");
     $("#cal-dot").hidden = true;
-    clearInterval(this.dotTimer);
+    this.stopBeats();
     if (this.running) send("cal-cancel");
     this.running = false;
+    paused = false;
+    wake();
+  },
+  stopBeats() {
+    this.timers.forEach(clearTimeout);
+    this.timers = [];
   },
   paint() {
     const t = ORDER[this.step];
@@ -582,20 +629,29 @@ const cal = {
     this.sawProgress = false;
     $("#cal-go").disabled = true;
     send("calibrate", { target: t });
+    this.stopBeats();
     if (t === "screen") {
-      // Hide the card and walk a dot around the window.
+      // Card fades out; the dot glides to each spot and pulses on the beat with a note.
       $("#cal").classList.add("dotting");
       const dot = $("#cal-dot");
       dot.hidden = false;
-      let i = 0;
-      const place = () => {
-        const [x, y] = DOTS[Math.min(i, DOTS.length - 1)];
-        dot.style.left = `${x * innerWidth}px`;
-        dot.style.top = `${y * innerHeight}px`;
-        i++;
-      };
-      place();
-      this.dotTimer = setInterval(place, 1000);
+      DOTS.forEach(([x, y], i) => {
+        this.timers.push(setTimeout(() => {
+          dot.style.transform = `translate3d(${x * innerWidth}px, ${y * innerHeight}px, 0)`;
+        }, i * BEAT));
+        this.timers.push(setTimeout(() => {
+          pulse(dot, "beat");
+          tone(NOTES[i]);
+        }, i * BEAT + (i === 0 ? 0 : MOVE)));
+      });
+    } else {
+      // Keep eyes on the book or the room; the ring keeps time.
+      for (let i = 0; i < 5; i++) {
+        this.timers.push(setTimeout(() => {
+          pulse($(".cal-ring"), "beat");
+          tone(i === 4 ? 659.25 : 440, 0.12, 0.08);
+        }, i * BEAT));
+      }
     }
   },
   update() {
@@ -611,7 +667,7 @@ const cal = {
     if (this.sawProgress && c.target === null) {
       // This step finished.
       this.running = false;
-      clearInterval(this.dotTimer);
+      this.stopBeats();
       $("#cal").classList.remove("dotting");
       $("#cal-dot").hidden = true;
       if (c.error) {
@@ -624,6 +680,7 @@ const cal = {
         this.step++;
         this.paint();
       } else {
+        chord();
         this.close();
         toast("Calibrated. Watch the label under your face to check it.");
       }
@@ -637,11 +694,11 @@ $("#cal-cancel").onclick = () => cal.close();
 /* ------------------------------------------------------------ tour */
 
 const STEPS = [
-  { el: "#stage", title: "This is what LockIn sees", text: "Your eyes and where they point are drawn live. The label shows what LockIn thinks you are doing." },
-  { el: "#calibrate", title: "Teach it your desk", text: "Calibrate once: look at the screen, then your book, then away. Fifteen seconds, and it learns your setup." },
-  { el: ".session", title: "Start a focus block", text: "Monitoring only runs while a focus block counts down. The small timer bar at the top of your screen shows the same clock." },
-  { el: "#brb", title: "Stepping away", text: "Getting water? Step away pauses everything without alarms. Press I'm back in time and the timer carries on where it stopped." },
-  { el: "#open-settings", title: "Everything else", text: "Blocked sites, penalties, sounds and shortcuts. Replay this tour from the question mark." },
+  { el: "#stage", title: "This is what LockIn sees", text: "Your eyes and where they point are drawn live. The label shows what LockIn thinks you are doing.", keys: [["O", "Open this window"]] },
+  { el: "#calibrate", title: "Teach it your desk", text: "Calibrate once: follow a dot on the screen, read your book, then look away. Fifteen seconds, and it learns your setup." },
+  { el: ".session", title: "Start a focus block", text: "Monitoring only runs while a focus block counts down. The timer bar at the top of your screen shows the same clock.", keys: [["P", "Start or pause"]] },
+  { el: "#brb", title: "Stepping away", text: "Getting water? Step away pauses everything without alarms. Come back in time and the timer carries on where it stopped.", keys: [["B", "Step away, or I'm back"]] },
+  { el: "#open-settings", title: "Shortcuts that work anywhere", text: "Blocked sites, penalties, sounds and the timer bar's opacity live in settings. Replay this tour from the question mark.", keys: [["C", "CAT calculator"], ["L", "Timer bar click-through"]] },
 ];
 
 const tour = {
@@ -668,6 +725,7 @@ const tour = {
     $("#tour-step").textContent = `${this.i + 1} of ${STEPS.length}`;
     $("#tour-title").textContent = s.title;
     $("#tour-text").textContent = s.text;
+    $("#tour-keys").innerHTML = (s.keys || []).map(([k, d]) => `<span><kbd>Ctrl</kbd><kbd>Alt</kbd><kbd>${k}</kbd>${esc(d)}</span>`).join("");
     $("#tour-back").hidden = this.i === 0;
     $("#tour-next").textContent = this.i === STEPS.length - 1 ? "Done" : "Next";
     const card = $("#tour-card");

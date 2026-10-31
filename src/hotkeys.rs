@@ -14,11 +14,11 @@ pub enum Hotkey {
 }
 
 pub const ALL: [(Hotkey, char, &str); 5] = [
-    (Hotkey::Calculator, 'C', "Toggle the CAT calculator"),
-    (Hotkey::StartPause, 'P', "Start / pause the pomodoro"),
-    (Hotkey::Brb, 'B', "BRB pause / I'm back"),
-    (Hotkey::Settings, 'O', "Open settings"),
-    (Hotkey::ClickThrough, 'L', "Lock overlay (click-through) on/off"),
+    (Hotkey::Calculator, 'C', "CAT calculator"),
+    (Hotkey::StartPause, 'P', "Start or pause the timer"),
+    (Hotkey::Brb, 'B', "Step away, or I'm back"),
+    (Hotkey::Settings, 'O', "Open LockIn"),
+    (Hotkey::ClickThrough, 'L', "Timer bar click-through on or off"),
 ];
 
 pub fn spawn(tx: Sender<Hotkey>, wake: Box<dyn Fn() + Send>) {
