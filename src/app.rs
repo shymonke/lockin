@@ -10,7 +10,7 @@ use crate::memes::{self, CatStyle, UserMeme};
 use crate::policy::{Action, Foreground, Gaze, Kind, Policy};
 use crate::pomodoro::{Event, Phase, Pomodoro};
 use crate::screen;
-use crate::vision::{self, CalTarget, Face, Objects};
+use crate::vision::{self, CalTarget, EyeOverlay, Face, Objects, PreviewSlot};
 use crate::web;
 use eframe::egui;
 use serde_json::{json, Value};
@@ -42,6 +42,8 @@ pub struct Alert {
 pub struct CamView {
     pub gaze: Option<Gaze>,
     pub face: Option<Face>,
+    pub eyes: Option<Vec<EyeOverlay>>,
+    pub confidence: f32,
     pub l1_ms: f32,
     pub l2: Option<(Objects, f32)>,
     pub error: Option<String>,
@@ -53,6 +55,8 @@ pub struct CamView {
 pub struct CalState {
     pub target: Option<CalTarget>,
     pub progress: f32,
+    /// Usable frames so far (face and both eyes found).
+    pub samples: usize,
     pub error: Option<String>,
 }
 
@@ -63,7 +67,7 @@ pub struct App {
     pub stats: Stats,
     pub pomo: Pomodoro,
     pub policy: Policy,
-    vision: Sender<vision::Cmd>,
+    pub vision: Sender<vision::Cmd>,
     vision_rx: Receiver<vision::Msg>,
     screen: Sender<screen::Cmd>,
     screen_rx: Receiver<Option<Foreground>>,
@@ -93,6 +97,7 @@ pub struct App {
     dash_was_open: bool,
     last_publish: Instant,
     first_tick: bool,
+    preview_cam: Option<u32>,
     seed: u64,
 }
 
@@ -104,7 +109,9 @@ impl App {
 
         let (vtx, vrx) = channel();
         let (vmsg_tx, vmsg_rx) = channel();
-        vision::spawn(vrx, vmsg_tx, Box::new(wake.clone()));
+        let preview: PreviewSlot = Arc::new(Mutex::new(None));
+        vision::spawn(vrx, vmsg_tx, Box::new(wake.clone()), preview.clone());
+        let _ = vtx.send(vision::Cmd::SetCalibration(s.calibration.clone()));
         let (stx, srx) = channel();
         let (smsg_tx, smsg_rx) = channel();
         screen::spawn(srx, smsg_tx, Box::new(wake.clone()));
@@ -115,8 +122,16 @@ impl App {
         let (dtx, dash_rx) = channel();
         let dash_shared = Arc::new(web::Shared {
             state: Mutex::new("{}".into()),
-            // TODO(merge): read the vision PreviewSlot once the eyes branch lands.
-            preview: Box::new(|| (json!({ "seq": null }).to_string(), None)),
+            preview: Box::new(move |with_jpeg| {
+                let slot = preview.lock().unwrap();
+                match slot.as_ref() {
+                    Some(f) => (
+                        json!({ "seq": f.seq, "w": f.width, "h": f.height, "overlay": f.overlay }).to_string(),
+                        with_jpeg.then(|| f.jpeg.clone()),
+                    ),
+                    None => (json!({ "seq": null }).to_string(), None),
+                }
+            }),
             actions: Mutex::new(dtx),
             wake: Box::new(wake),
         });
@@ -164,6 +179,7 @@ impl App {
             dash_was_open: false,
             last_publish: Instant::now(),
             first_tick: true,
+            preview_cam: None,
             seed,
         }
     }
@@ -251,7 +267,7 @@ impl App {
     }
 
     pub fn calibrate(&mut self, target: CalTarget) {
-        self.cal = CalState { target: Some(target), progress: 0.0, error: None };
+        self.cal = CalState { target: Some(target), ..Default::default() };
         let _ = self.vision.send(vision::Cmd::Calibrate { camera: self.s.camera_index, target });
     }
 
@@ -308,7 +324,10 @@ impl App {
                 }
             }
             "cal-cancel" => self.cal = CalState::default(),
-            "cal-reset" => self.s.calibration = Default::default(),
+            "cal-reset" => {
+                self.s.calibration = Default::default();
+                let _ = self.vision.send(vision::Cmd::SetCalibration(self.s.calibration.clone()));
+            }
             "test-sound" => {
                 let _ = self.audio.send(audio::Cmd::Alarm { sound: self.s.sound.clone(), volume: self.s.volume, looping: false });
             }
@@ -379,6 +398,7 @@ impl App {
             "cal": {
                 "target": self.cal.target.map(cal_name),
                 "progress": self.cal.progress,
+                "samples": self.cal.samples,
                 "error": self.cal.error,
             },
             "today": {
@@ -579,17 +599,16 @@ impl App {
         let mut actions = Vec::new();
         while let Ok(m) = self.vision_rx.try_recv() {
             match m {
-                vision::Msg::Obs { obs, face, l1_ms, l2 } => {
+                vision::Msg::Obs { obs, face, eyes, gaze, l1_ms, l2 } => {
                     self.cam.error = None;
                     self.cam.face = face;
+                    self.cam.eyes = eyes;
                     self.cam.l1_ms = l1_ms;
                     if l2.is_some() {
                         self.cam.l2 = l2;
                     }
-                    self.cam.gaze = Some(match obs.face {
-                        Some(p) => crate::policy::classify_gaze(p, &self.s.calibration),
-                        None => Gaze::Absent,
-                    });
+                    self.cam.gaze = gaze.map(|g| g.0);
+                    self.cam.confidence = gaze.map_or(0.0, |g| g.1);
                     if self.policy_live && self.s.camera_enabled {
                         actions.extend(self.policy.on_camera(obs, now, &self.s));
                         self.cam.gaze = self.policy.gaze;
@@ -602,23 +621,44 @@ impl App {
                         }
                     }
                 }
-                vision::Msg::Calibrated(target, pose) => {
+                vision::Msg::CalProgress { target, progress, samples } => {
+                    if self.cal.target == Some(target) {
+                        self.cal.progress = progress;
+                        self.cal.samples = samples;
+                    }
+                }
+                vision::Msg::Calibrated { target, samples, error } => {
                     // A cancelled step's late result is dropped.
                     if self.cal.target != Some(target) {
                         continue;
                     }
                     self.cal = CalState::default();
-                    match pose {
-                        Some(p) => match target {
-                            CalTarget::Screen => self.s.calibration.screen = Some(p),
-                            CalTarget::Book => self.s.calibration.book = Some(p),
-                        },
-                        None => {
-                            self.cal.error = Some(match target {
-                                CalTarget::Screen => "No face found. Sit in front of the camera, check it isn't covered, then try again.".into(),
-                                CalTarget::Book => "No face found. Tilt the screen so the camera still sees your face while you read, then try again.".into(),
-                            });
+                    if let Some(e) = error {
+                        self.cal.error = Some(e);
+                    } else {
+                        let count = samples.len();
+                        if matches!(target, CalTarget::Screen | CalTarget::Book) && count > 0 {
+                            let n = count as f32;
+                            let avg = |i: usize| samples.iter().map(|s| s.values[i]).sum::<f32>() / n;
+                            let p = crate::config::Pose {
+                                yaw: avg(0) / 70.0,
+                                pitch: avg(1) / 75.0 + 0.62,
+                                roll: avg(2),
+                                area: avg(9),
+                                center: [avg(10), avg(11)],
+                            };
+                            match target {
+                                CalTarget::Screen => self.s.calibration.screen = Some(p),
+                                CalTarget::Book => self.s.calibration.book = Some(p),
+                                CalTarget::Away => {}
+                            }
                         }
+                        match target {
+                            CalTarget::Screen => self.s.calibration.screen_samples = samples,
+                            CalTarget::Book => self.s.calibration.book_samples = samples,
+                            CalTarget::Away => self.s.calibration.away_samples = samples,
+                        }
+                        let _ = self.vision.send(vision::Cmd::SetCalibration(self.s.calibration.clone()));
                     }
                 }
                 vision::Msg::Error(e) => {
@@ -696,8 +736,13 @@ impl App {
             self.last_stats_save = Instant::now();
         }
 
-        // Dashboard: publish a snapshot a few times a second while it is open.
+        // Dashboard: live camera preview while it is open, and a state snapshot a few times a second.
         let dash_open = self.dash.is_open();
+        let want_preview = dash_open.then_some(self.s.camera_index);
+        if want_preview != self.preview_cam {
+            let _ = self.vision.send(vision::Cmd::Preview(want_preview));
+            self.preview_cam = want_preview;
+        }
         if dash_open && (self.last_publish.elapsed().as_millis() >= 200 || !self.dash_was_open) {
             self.publish_state();
             self.last_publish = Instant::now();
@@ -737,6 +782,8 @@ impl App {
             if want.is_none() {
                 self.cam.gaze = None;
                 self.cam.face = None;
+                self.cam.eyes = None;
+                self.cam.confidence = 0.0;
             }
             self.cam_running = want;
         }
@@ -763,7 +810,7 @@ fn cal_target(name: &str) -> Option<CalTarget> {
     match name {
         "screen" => Some(CalTarget::Screen),
         "book" => Some(CalTarget::Book),
-        // TODO(merge): "away" arrives with the eyes branch's CalTarget::Away.
+        "away" => Some(CalTarget::Away),
         _ => None,
     }
 }
@@ -772,10 +819,11 @@ fn cal_name(t: CalTarget) -> &'static str {
     match t {
         CalTarget::Screen => "screen",
         CalTarget::Book => "book",
+        CalTarget::Away => "away",
     }
 }
 
 /// Samples collected per target, for the dashboard summary.
 fn calibration_counts(c: &crate::config::Calibration) -> Value {
-    json!({ "screen": c.screen.is_some() as u32, "book": c.book.is_some() as u32, "away": 0 })
+    json!({ "screen": c.screen_samples.len(), "book": c.book_samples.len(), "away": c.away_samples.len() })
 }

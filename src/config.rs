@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct Pose {
     /// Nose offset from the eye midpoint, in eye-distance units (left/right turn).
     pub yaw: f32,
@@ -11,12 +12,38 @@ pub struct Pose {
     pub pitch: f32,
     /// Face box area as a fraction of the frame (grows when leaning in).
     pub area: f32,
+    /// In-plane head roll in degrees. Older settings omit this field.
+    pub roll: f32,
+    /// Face-box centre in normalised frame coordinates. Older settings omit this field.
+    pub center: [f32; 2],
+}
+
+pub const GAZE_FEATURES: usize = 12;
+
+/// One eye/head observation used by the per-user gaze classifier.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct FeatureSample {
+    /// yaw/pitch/roll degrees, two iris x/y ratios, two openness ratios,
+    /// face area and face centre x/y.
+    pub values: [f32; GAZE_FEATURES],
+}
+
+impl Default for FeatureSample {
+    fn default() -> Self {
+        Self { values: [0.0; GAZE_FEATURES] }
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct Calibration {
+    /// Legacy pose averages retained for old settings and uncalibrated fallback/posture size.
     pub screen: Option<Pose>,
     pub book: Option<Pose>,
+    pub screen_samples: Vec<FeatureSample>,
+    pub book_samples: Vec<FeatureSample>,
+    pub away_samples: Vec<FeatureSample>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -80,6 +107,8 @@ pub struct Settings {
     pub phone_detection: bool,
     pub phone_check_secs: u32,
     pub calibration: Calibration,
+    /// Dashboard shows only the tracking lines, not the camera picture (privacy / screen sharing).
+    pub hide_camera_image: bool,
 
     // Screen layer
     pub screen_enabled: bool,
@@ -141,6 +170,7 @@ impl Default for Settings {
             phone_detection: true,
             phone_check_secs: 45,
             calibration: Calibration::default(),
+            hide_camera_image: false,
 
             screen_enabled: true,
             blocked_sites: s(&["x.com", "twitter.com", "instagram.com", "tiktok.com", "facebook.com"]),

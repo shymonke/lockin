@@ -31,8 +31,8 @@ const BG: (u8, u8, u8) = (20, 23, 29);
 pub struct Shared {
     /// App snapshot as JSON (`/state`).
     pub state: Mutex<String>,
-    /// `/preview` JSON and `/frame` JPEG, produced on demand.
-    pub preview: Box<dyn Fn() -> (String, Option<(u64, Arc<Vec<u8>>)>) + Send + Sync>,
+    /// `/preview` JSON and (when asked) the `/frame` JPEG of the latest camera preview.
+    pub preview: Box<dyn Fn(bool) -> (String, Option<Vec<u8>>) + Send + Sync>,
     /// Actions posted by the page.
     pub actions: Mutex<Sender<serde_json::Value>>,
     pub wake: Box<dyn Fn() + Send + Sync>,
@@ -145,9 +145,9 @@ fn serve(shared: &Shared, req: &Request<Vec<u8>>) -> Response<Cow<'static, [u8]>
         "/app.css" => respond("text/css; charset=utf-8", asset("app.css", CSS)),
         "/app.js" => respond("text/javascript; charset=utf-8", asset("app.js", JS)),
         "/state" => respond("application/json", Cow::Owned(shared.state.lock().unwrap().clone().into_bytes())),
-        "/preview" => respond("application/json", Cow::Owned((shared.preview)().0.into_bytes())),
-        "/frame" => match (shared.preview)().1 {
-            Some((_, jpeg)) => respond("image/jpeg", Cow::Owned(jpeg.as_ref().clone())),
+        "/preview" => respond("application/json", Cow::Owned((shared.preview)(false).0.into_bytes())),
+        "/frame" => match (shared.preview)(true).1 {
+            Some(jpeg) => respond("image/jpeg", Cow::Owned(jpeg)),
             None => Response::builder().status(404).body(Cow::Borrowed(&[][..])).unwrap(),
         },
         _ => Response::builder().status(404).body(Cow::Borrowed(&[][..])).unwrap(),

@@ -1,0 +1,5 @@
+iris.onnx is the 64x64 float32 conversion of MediaPipe's iris_landmark.tflite.
+
+Original model: https://storage.googleapis.com/mediapipe-assets/iris_landmark.tflite
+Conversion source: https://github.com/PINTO0309/PINTO_model_zoo/tree/main/049_iris_landmark
+License: Apache License 2.0; see iris.LICENSE.

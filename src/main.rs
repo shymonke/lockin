@@ -82,29 +82,51 @@ fn single_instance() -> bool {
 /// and print detections, poses and timings.
 fn diag(images: &[String]) {
     use std::time::Instant;
+    let calibration = config::Settings::load().calibration;
     let t = Instant::now();
     let face = vision::FaceModel::load().expect("face model");
     println!("face model load {:.0} ms", t.elapsed().as_secs_f64() * 1e3);
+    let t = Instant::now();
+    let eye = vision::EyeModel::load().expect("eye model");
+    println!("eye model load {:.0} ms", t.elapsed().as_secs_f64() * 1e3);
     let t = Instant::now();
     let obj = vision::ObjectModel::load().expect("object model");
     println!("object model load {:.0} ms", t.elapsed().as_secs_f64() * 1e3);
     let report = |f: &camera::Frame| {
         let t = Instant::now();
         let d = face.detect(f).unwrap();
+        let eyes = d.as_ref().and_then(|d| eye.detect(f, d).unwrap());
         let l1 = t.elapsed().as_secs_f64() * 1e3;
         let t = Instant::now();
         let o = obj.detect(f).unwrap();
         let l2 = t.elapsed().as_secs_f64() * 1e3;
         match d {
-            Some(d) => println!(
-                "  face {:.2} rect {:?} pose {:?} | person {:.2} phone {:.2} | L1 {l1:.1} ms L2 {l2:.1} ms",
-                d.score,
-                d.rect.map(|v| (v * 100.0).round() / 100.0),
-                d.pose(),
-                o.person,
-                o.phone
+            Some(d) => {
+                let gaze = eyes.as_ref().map(|e| e.direction());
+                let overlays = eyes.as_ref().map(|e| e.overlays()).unwrap_or_default();
+                let classified = eyes
+                    .as_ref()
+                    .and_then(|e| policy::classify_gaze_features(&vision::feature_sample(&d, e), &calibration))
+                    .unwrap_or((policy::classify_gaze(d.pose(), &calibration), 0.45));
+                println!(
+                    "  face {:.2} rect {:?} head {:?} gaze {:?} label {:?} confidence {:.2} | person {:.2} phone {:.2} | L1+eyes {l1:.1} ms L2 {l2:.1} ms",
+                    d.score,
+                    d.rect.map(|v| (v * 100.0).round() / 100.0),
+                    d.head().map(|v| (v * 10.0).round() / 10.0),
+                    gaze.map(|g| g.map(|v| (v * 100.0).round() / 100.0)),
+                    classified.0,
+                    classified.1,
+                    o.person,
+                    o.phone
+                );
+                for (i, e) in overlays.iter().enumerate() {
+                    println!("    eye {i}: iris [{:.4}, {:.4}] r {:.4} open {:.3} contour {}", e.iris[0], e.iris[1], e.iris_r, e.open, e.contour.len());
+                }
+            }
+            None => println!(
+                "  no face eyes 0 head None gaze None label Absent confidence 1.00 | person {:.2} phone {:.2} | L1+eyes {l1:.1} ms L2 {l2:.1} ms",
+                o.person, o.phone
             ),
-            None => println!("  no face | person {:.2} phone {:.2} | L1 {l1:.1} ms L2 {l2:.1} ms", o.person, o.phone),
         }
     };
     if images.is_empty() {

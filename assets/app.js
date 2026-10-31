@@ -113,7 +113,7 @@ async function previewLoop() {
         lastPreview = performance.now();
         showEmpty(null);
       } else if (p.seq === null) {
-        showEmpty("Starting your camera…");
+        showEmpty(S && S.cam.error ? S.cam.error : "Starting your camera…");
       }
     } catch (_) { /* ignore */ }
   }
@@ -154,12 +154,14 @@ function draw() {
     const s = Math.max(w / frame.width, h / frame.height);
     const dw = frame.width * s, dh = frame.height * s;
     const ox = (w - dw) / 2, oy = (h - dh) / 2;
-    ctx.save();
-    ctx.translate(w, 0);
-    ctx.scale(-1, 1);
-    ctx.globalAlpha = 0.92;
-    ctx.drawImage(frame, w - ox - dw, oy, dw, dh);
-    ctx.restore();
+    if (!(S && S.settings.hide_camera_image)) {
+      ctx.save();
+      ctx.translate(w, 0);
+      ctx.scale(-1, 1);
+      ctx.globalAlpha = 0.92;
+      ctx.drawImage(frame, w - ox - dw, oy, dw, dh);
+      ctx.restore();
+    }
     // Soft vignette keeps the overlay legible.
     const g = ctx.createLinearGradient(0, h * 0.55, 0, h);
     g.addColorStop(0, "rgba(20,23,29,0)");
@@ -367,6 +369,7 @@ const SECTIONS = {
       <div class="row"><label for="f-mode">How often</label>
         <select class="field" id="f-mode" data-k="camera_mode"><option value="Interval">Every few seconds (saves power)</option><option value="Always">Continuously, 2 per second</option></select></div>
       ${num("check_interval_secs", "Check every", 1, 30, "sec")}
+      ${sw("hide_camera_image", "Hide the camera picture", "Only the tracking lines show here, handy when sharing your screen")}
       <p class="help">Frames stay in memory and are never saved. The camera turns off during breaks.</p>
     </div>
     <div class="group"><h4>When to alert</h4>
@@ -570,6 +573,7 @@ const cal = {
       this.sawProgress = true;
       $("#cal-prog").style.strokeDashoffset = 326.7 * (1 - c.progress);
       $("#cal-count").textContent = Math.max(0, Math.ceil(5 * (1 - c.progress)));
+      if (t !== "screen") $("#cal-body").textContent = c.samples ? `${c.samples} clear looks so far. Keep going.` : CAL[t][1];
     }
     if (this.sawProgress && c.target === null) {
       // This step finished.
