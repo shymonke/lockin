@@ -130,6 +130,8 @@ pub struct Settings {
     // Windows
     pub overlay_pos: Option<[f32; 2]>,
     pub overlay_click_through: bool,
+    /// Timer bar opacity when not hovered (0.3..1).
+    pub pill_opacity: f32,
     pub calc_pos: Option<[f32; 2]>,
     pub tour_done: bool,
 }
@@ -189,6 +191,7 @@ impl Default for Settings {
 
             overlay_pos: None,
             overlay_click_through: false,
+            pill_opacity: 0.92,
             calc_pos: None,
             tour_done: false,
         }

@@ -1,17 +1,33 @@
-//! egui-winit enables Windows' undecorated shadow, including a 1 px non-client strip.
-//! Turn off DWM's frame after viewport creation, without changing winit's window styles.
+//! egui-winit enables Windows' undecorated shadow on frameless windows. winit implements it by
+//! shifting the client area down 1 px in WM_NCCALCSIZE, which leaves a visible line above our
+//! transparent overlays. We turn off DWM's frame and subclass those windows so the client area
+//! is the whole window again.
 
 use std::mem::size_of_val;
 use windows::core::{w, BOOL};
-use windows::Win32::Foundation::{HANDLE, HWND, LPARAM};
+use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
     DwmSetWindowAttribute, DWMWINDOWATTRIBUTE, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DWMWA_NCRENDERING_POLICY,
     DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DWMNCRP_DISABLED,
 };
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumThreadWindows, GetPropW, GetWindowTextW, SetPropW,
+    CallWindowProcW, EnumThreadWindows, GetPropW, GetWindowTextW, SetPropW, SetWindowLongPtrW, SetWindowPos, GWLP_WNDPROC,
+    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WM_NCCALCSIZE, WNDPROC,
 };
+
+const OLD_PROC: windows::core::PCWSTR = w!("LockIn.OverlayOldProc");
+
+/// Subclass proc: client area = window area (no winit 1 px shadow strip), everything else to winit.
+unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    unsafe {
+        if msg == WM_NCCALCSIZE && wp.0 != 0 {
+            return LRESULT(0);
+        }
+        let old: WNDPROC = std::mem::transmute(GetPropW(hwnd, OLD_PROC).0);
+        CallWindowProcW(old, hwnd, msg, wp, lp)
+    }
+}
 
 pub fn remove_overlay_frames() {
     // SAFETY: synchronous enumeration of this UI thread's top-level windows only.
@@ -42,6 +58,14 @@ unsafe extern "system" fn remove_frame(hwnd: HWND, _: LPARAM) -> BOOL {
         let _ = set_attribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &DWMWCP_DONOTROUND);
         if set_attribute(hwnd, DWMWA_NCRENDERING_POLICY, &DWMNCRP_DISABLED).is_ok() {
             let _ = SetPropW(hwnd, marker, Some(HANDLE(1usize as *mut _)));
+        }
+        // Store winit's proc before swapping so overlay_proc can always forward.
+        let proc_ptr: unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT = overlay_proc;
+        let old = windows::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(hwnd, GWLP_WNDPROC);
+        if old != proc_ptr as isize {
+            let _ = SetPropW(hwnd, OLD_PROC, Some(HANDLE(old as *mut _)));
+            SetWindowLongPtrW(hwnd, GWLP_WNDPROC, proc_ptr as isize);
+            let _ = SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
         }
     }
     BOOL(1)

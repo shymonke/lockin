@@ -5,13 +5,13 @@ use crate::app::{App, Level};
 use crate::memes;
 use crate::policy::{Gaze, Kind};
 use crate::pomodoro::Phase;
-use crate::theme::{self, display, strong};
+use crate::theme::{self, display, icon, strong};
 use eframe::egui::{
     self, pos2, vec2, Align2, Color32, CornerRadius, FontId, Id, Rect, Sense, Shape, Stroke, StrokeKind, Ui, ViewportBuilder,
     ViewportCommand, ViewportId,
 };
 
-pub const PILL: egui::Vec2 = vec2(330.0, 56.0);
+pub const PILL: egui::Vec2 = vec2(352.0, 60.0);
 
 fn mmss(secs: f64) -> String {
     let s = secs.max(0.0).ceil() as u64;
@@ -24,62 +24,32 @@ fn soft_color(ctx: &egui::Context, id: Id, target: Color32) -> Color32 {
     Color32::from_rgb(ch(0, target.r()), ch(1, target.g()), ch(2, target.b()))
 }
 
-/// Round icon button with a fading hover wash.
-fn icon_button(ui: &mut Ui, rect: Rect, id: &str, tip: &str, paint: impl FnOnce(&egui::Painter, Rect, Color32)) -> bool {
+/// Round Phosphor-icon button with a fading hover wash.
+fn icon_button(ui: &mut Ui, rect: Rect, id: &str, tip: &str, glyph: char, ink: Option<Color32>) -> bool {
     let r = ui.interact(rect, ui.scope_id().with(id), Sense::click()).on_hover_text(tip);
     let hover = ui.ctx().animate_bool_with_time(r.id, r.hovered(), 0.15);
     let p = ui.painter();
     let wash = if r.is_pointer_button_down_on() { theme::HOVER } else { theme::RAISED };
     p.circle_filled(rect.center(), rect.width() / 2.0, wash.gamma_multiply(hover));
-    let ink = theme::MUTED.lerp_to_gamma(theme::TEXT, hover);
-    paint(p, rect.shrink(9.5), ink);
+    let ink = ink.unwrap_or_else(|| theme::MUTED.lerp_to_gamma(theme::TEXT, hover));
+    p.text(rect.center(), Align2::CENTER_CENTER, glyph, theme::icons(18.0), ink);
     r.clicked()
 }
 
-fn stroke(c: Color32) -> Stroke {
-    Stroke::new(1.6, c)
-}
-fn paint_play(p: &egui::Painter, r: Rect, c: Color32) {
-    let r = r.shrink(1.0);
-    p.add(Shape::convex_polygon(vec![r.left_top() + vec2(2.5, 0.0), r.left_bottom() + vec2(2.5, 0.0), pos2(r.right(), r.center().y)], c, Stroke::NONE));
-}
-fn paint_pause(p: &egui::Painter, r: Rect, c: Color32) {
-    let r = r.shrink(1.0);
-    for x in [r.left() + r.width() * 0.3, r.right() - r.width() * 0.3] {
-        p.line_segment([pos2(x, r.top()), pos2(x, r.bottom())], Stroke::new(2.2, c));
+/// Arc from 12 o'clock, clockwise, covering `frac` of the circle.
+fn arc(p: &egui::Painter, c: egui::Pos2, r: f32, frac: f32, stroke: Stroke) {
+    let frac = frac.clamp(0.0, 1.0);
+    if frac <= 0.0 {
+        return;
     }
-}
-/// Cup: stepping away.
-fn paint_cup(p: &egui::Painter, r: Rect, c: Color32) {
-    let body = Rect::from_min_max(pos2(r.left(), r.top() + r.height() * 0.3), pos2(r.right() - r.width() * 0.25, r.bottom()));
-    p.rect_stroke(body, CornerRadius { nw: 1, ne: 1, sw: 4, se: 4 }, stroke(c), StrokeKind::Inside);
-    p.circle_stroke(pos2(body.right() + 1.5, body.center().y - 1.0), r.width() * 0.17, stroke(c));
-    for x in [body.left() + body.width() * 0.35, body.left() + body.width() * 0.65] {
-        p.line_segment([pos2(x, r.top()), pos2(x, r.top() + r.height() * 0.18)], stroke(c));
-    }
-}
-/// Return arrow: I'm back.
-fn paint_back(p: &egui::Painter, r: Rect, c: Color32) {
-    let y = r.center().y + 2.0;
-    p.add(Shape::line(vec![pos2(r.right(), r.top() + 1.0), pos2(r.right(), y), pos2(r.left() + 1.0, y)], stroke(c)));
-    p.add(Shape::line(vec![pos2(r.left() + 5.0, y - 4.0), pos2(r.left() + 1.0, y), pos2(r.left() + 5.0, y + 4.0)], stroke(c)));
-}
-fn paint_calc(p: &egui::Painter, r: Rect, c: Color32) {
-    p.rect_stroke(r, 3.0, stroke(c), StrokeKind::Inside);
-    let line = r.top() + r.height() * 0.32;
-    p.line_segment([pos2(r.left() + 3.0, line), pos2(r.right() - 3.0, line)], stroke(c));
-    for i in 0..3 {
-        for j in 0..2 {
-            let x = r.left() + r.width() * (0.27 + 0.23 * i as f32);
-            let y = r.top() + r.height() * (0.55 + 0.24 * j as f32);
-            p.circle_filled(pos2(x, y), 1.2, c);
-        }
-    }
-}
-/// Window with a lens: open LockIn.
-fn paint_app(p: &egui::Painter, r: Rect, c: Color32) {
-    p.rect_stroke(r, 3.0, stroke(c), StrokeKind::Inside);
-    p.circle_stroke(r.center() + vec2(0.0, 1.0), r.width() * 0.2, stroke(c));
+    let n = (64.0 * frac).ceil().max(2.0) as usize;
+    let pts = (0..=n)
+        .map(|i| {
+            let a = -std::f32::consts::FRAC_PI_2 + std::f32::consts::TAU * frac * i as f32 / n as f32;
+            c + vec2(a.cos(), a.sin()) * r
+        })
+        .collect();
+    p.add(Shape::line(pts, stroke));
 }
 
 impl App {
@@ -100,7 +70,7 @@ impl App {
                 let label = if self.pomo.phase == Phase::LongBreak { "Long break" } else { "Break" };
                 (theme::BREAK, if self.pomo.running { label.into() } else { format!("{label}, paused") })
             }
-            Phase::Focus if !self.pomo.running => (theme::MUTED, if self.pomo_started() { "Paused".into() } else { "Ready".into() }),
+            Phase::Focus if !self.pomo.running => (theme::MUTED, if self.pomo_started() { "Paused".into() } else { "Ready to focus".into() }),
             Phase::Focus if self.pomo.distracted_hold => (theme::CAUTION, "Timer waits for you".into()),
             Phase::Focus if !self.s.camera_enabled => (theme::FOCUS, if brain { "Locked in".into() } else { "Focusing".into() }),
             Phase::Focus if self.cam.error.is_some() => (theme::CAUTION, "Camera unavailable".into()),
@@ -114,7 +84,18 @@ impl App {
         }
     }
 
-    /// Root viewport: the always-on-top pill.
+    /// Share of the current phase already done (penalty time included), for the ring.
+    fn phase_progress(&self) -> f32 {
+        let mins = match self.pomo.phase {
+            Phase::Focus => self.s.focus_min,
+            Phase::ShortBreak => self.s.short_break_min,
+            Phase::LongBreak => self.s.long_break_min,
+        };
+        let total = mins as f64 * 60.0 + if self.pomo.phase == Phase::Focus { self.pomo.block_added_secs as f64 } else { 0.0 };
+        (1.0 - self.pomo.remaining / total.max(1.0)) as f32
+    }
+
+    /// Root viewport: the always-on-top timer bar.
     pub fn pill_ui(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
         let full = ui.max_rect();
@@ -141,38 +122,57 @@ impl App {
         if bg.secondary_clicked() || bg.double_clicked() {
             self.open_dashboard();
         }
+        // Configured opacity at rest; fully opaque while the pointer is over the bar.
+        let hovered = ctx.input(|i| i.pointer.hover_pos()).is_some_and(|p| rect.contains(p));
+        let lift = ctx.animate_bool_with_time(Id::unique("pill-hover"), hovered, 0.2);
+        let rest = self.s.pill_opacity.clamp(0.3, 1.0);
+        ui.multiply_opacity(rest + (1.0 - rest) * lift);
 
         let (tone, label) = self.status();
         let tone = soft_color(&ctx, Id::unique("pill-tone"), tone);
         let edge = soft_color(&ctx, Id::unique("pill-edge"), if self.alarm_active() { theme::ALERT.gamma_multiply(0.55) } else { theme::LINE });
-        let p = ui.painter();
-        p.rect_filled(rect, CornerRadius::same(255), Color32::from_rgba_unmultiplied(27, 31, 39, 245));
+        let p = ui.painter().clone();
+        p.rect_filled(rect, CornerRadius::same(255), Color32::from_rgba_unmultiplied(27, 31, 39, 248));
         p.rect_stroke(rect, CornerRadius::same(255), Stroke::new(1.0, edge), StrokeKind::Inside);
-        let dc = pos2(rect.left() + 24.0, rect.center().y);
-        p.circle_filled(dc, 9.0, tone.gamma_multiply(0.16));
-        p.circle_filled(dc, 4.5, tone);
 
-        p.text(pos2(rect.left() + 42.0, rect.center().y + 1.0), Align2::LEFT_BOTTOM, mmss(self.pomo.remaining), display(25.0), theme::TEXT);
+        // Progress ring with the state dot in the middle.
+        let cy = rect.center().y;
+        let ring = pos2(rect.left() + 30.0, cy);
+        let progress = ctx.animate_value_with_time(Id::unique("pill-progress"), self.phase_progress(), 0.6);
+        p.circle_stroke(ring, 14.0, Stroke::new(2.5, theme::RAISED));
+        arc(&p, ring, 14.0, progress, Stroke::new(2.5, tone));
+        p.circle_filled(ring, 4.0, tone);
+
+        // Clock and status as one vertically centred block.
+        let text_x = rect.left() + 56.0;
+        let clock = ctx.fonts_mut(|f| f.layout_no_wrap(mmss(self.pomo.remaining), display(24.0), theme::TEXT));
         let mut sub = label;
         if self.pomo.block_added_secs > 0 && self.pomo.phase == Phase::Focus {
             sub = format!("{sub}   +{}m", self.pomo.block_added_secs.div_ceil(60));
         }
-        p.text(pos2(rect.left() + 43.0, rect.center().y + 2.0), Align2::LEFT_TOP, sub, FontId::proportional(11.5), theme::MUTED);
+        let status = ctx.fonts_mut(|f| f.layout_no_wrap(sub, FontId::proportional(11.5), theme::MUTED));
+        // Font line boxes carry extra leading; tighten the gap so the pair reads as one unit.
+        let gap = -5.0;
+        let block = clock.size().y + gap + status.size().y;
+        let top = cy - block / 2.0;
+        p.galley(pos2(text_x, top), clock.clone(), theme::TEXT);
+        p.galley(pos2(text_x + 1.0, top + clock.size().y + gap), status, theme::MUTED);
 
-        // Buttons, right to left.
+        // Buttons, right to left, with a hairline divider before them.
         let size = 32.0;
-        let cy = rect.center().y;
-        let mut x = rect.right() - 10.0 - size / 2.0;
+        let mut x = rect.right() - 12.0 - size / 2.0;
         let mut next = || {
             let r = Rect::from_center_size(pos2(x, cy), vec2(size, size));
             x -= size + 2.0;
             r
         };
         let (app, calc, brb, play) = (next(), next(), next(), next());
-        if icon_button(ui, app, "app", "Open LockIn (Ctrl+Alt+O)", paint_app) {
+        let divider = play.left() - 8.0;
+        p.line_segment([pos2(divider, cy - 13.0), pos2(divider, cy + 13.0)], Stroke::new(1.0, theme::LINE));
+        if icon_button(ui, app, "app", "Open LockIn (Ctrl+Alt+O)", icon::APP, None) {
             self.open_dashboard();
         }
-        if icon_button(ui, calc, "calc", "Calculator (Ctrl+Alt+C)", paint_calc) {
+        if icon_button(ui, calc, "calc", "Calculator (Ctrl+Alt+C)", icon::CALCULATOR, None) {
             self.calc_open = !self.calc_open;
             if self.calc_open {
                 self.calc.open();
@@ -181,20 +181,22 @@ impl App {
         }
         let back = self.pomo.brb.is_some() || self.alarm_active();
         let can_step_away = self.pomo.focusing();
-        let tip = if back { "I'm back (Ctrl+Alt+B)" } else { "Step away without alarms (Ctrl+Alt+B)" };
-        if icon_button(ui, brb, "brb", tip, |p, r, c| {
-            if back {
-                paint_back(p, r, theme::FOCUS)
-            } else {
-                paint_cup(p, r, if can_step_away { c } else { c.gamma_multiply(0.4) })
-            }
-        }) && (back || can_step_away)
-        {
+        let (glyph, ink, tip) = if back {
+            (icon::BACK, Some(theme::FOCUS), "I'm back (Ctrl+Alt+B)")
+        } else if can_step_away {
+            (icon::COFFEE, None, "Step away without alarms (Ctrl+Alt+B)")
+        } else {
+            (icon::COFFEE, Some(theme::MUTED.gamma_multiply(0.45)), "Step away works during a focus block (Ctrl+Alt+B)")
+        };
+        if icon_button(ui, brb, "brb", tip, glyph, ink) && (back || can_step_away) {
             self.brb_or_back();
         }
-        let running = self.pomo.running;
-        if icon_button(ui, play, "play", "Start or pause (Ctrl+Alt+P)", |p, r, c| if running { paint_pause(p, r, c) } else { paint_play(p, r, c) }) {
+        let glyph = if self.pomo.running { icon::PAUSE } else { icon::PLAY };
+        if icon_button(ui, play, "play", "Start or pause (Ctrl+Alt+P)", glyph, Some(theme::TEXT)) {
             self.toggle_timer();
+        }
+        if lift > 0.0 && lift < 1.0 {
+            ctx.request_repaint();
         }
     }
 

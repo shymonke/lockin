@@ -20,6 +20,22 @@ pub const BREAK: Color32 = Color32::from_rgb(134, 182, 230);
 fn family(name: &str) -> FontFamily {
     FontFamily::Name(name.into())
 }
+/// Phosphor icons (MIT), subset to the glyphs LockIn uses; shared with the dashboard.
+pub static ICON_FONT: &[u8] = include_bytes!("../assets/fonts/phosphor-lockin.ttf");
+
+pub mod icon {
+    pub const PLAY: char = '\u{e3d0}';
+    pub const PAUSE: char = '\u{e39e}';
+    pub const COFFEE: char = '\u{e1c2}';
+    pub const BACK: char = '\u{e08a}';
+    pub const CALCULATOR: char = '\u{e538}';
+    pub const APP: char = '\u{e5da}';
+}
+
+pub fn icons(size: f32) -> FontId {
+    FontId::new(size, family("icons"))
+}
+
 /// Large light numerals (timer).
 pub fn display(size: f32) -> FontId {
     FontId::new(size, family("light"))
@@ -56,6 +72,8 @@ pub fn install(ctx: &egui::Context) {
     fonts.families.insert(family("light"), with(light.then_some("segoe-light")).into_iter().chain(prop.clone()).collect());
     fonts.families.insert(family("semibold"), with(semibold.then_some("segoe-semibold")).into_iter().chain(prop.clone()).collect());
     fonts.families.insert(FontFamily::Proportional, prop);
+    fonts.font_data.insert("phosphor".into(), Arc::new(FontData::from_static(ICON_FONT)));
+    fonts.families.insert(family("icons"), vec!["phosphor".into()]);
     ctx.set_fonts(fonts);
 
     ctx.all_styles_mut(|style| {

@@ -108,8 +108,12 @@ async function previewLoop() {
         showEmpty(p.error);
       } else if (p.seq !== null && p.seq !== frameSeq) {
         const blob = await (await fetch(`frame?seq=${p.seq}`, { cache: "no-store" })).blob();
-        if (frame) frame.close();
-        frame = await createImageBitmap(blob);
+        // Decode first, then swap: closing the old bitmap before the new one exists let draw()
+        // hit a closed image, throw, and stop the loop for good (frozen preview and label).
+        const next = await createImageBitmap(blob);
+        const old = frame;
+        frame = next;
+        if (old) old.close();
         frameSeq = p.seq;
         target = p.overlay;
         lastPreview = performance.now();
@@ -144,10 +148,10 @@ function lerpOverlay(a, b, k) {
 }
 
 // Redraw only after a new frame and while the overlay glides (~0.5 s), at most 30 fps.
-let settleUntil = 0, drawing = false, lastDraw = 0;
+let settleUntil = 0, drawing = false, lastDraw = 0, paused = false;
 function wake() {
   settleUntil = performance.now() + 500;
-  if (!drawing) {
+  if (!drawing && !paused) {
     drawing = true;
     requestAnimationFrame(draw);
   }
@@ -160,6 +164,17 @@ function draw(now) {
     return;
   }
   lastDraw = now;
+  try {
+    paint();
+  } catch (e) {
+    // Never let one bad frame stop the loop.
+    console.error(e);
+  }
+  if (!paused && performance.now() < settleUntil) requestAnimationFrame(draw);
+  else drawing = false;
+}
+
+function paint() {
   const dpr = devicePixelRatio || 1;
   const w = view.clientWidth, h = view.clientHeight;
   if (view.width !== Math.round(w * dpr) || view.height !== Math.round(h * dpr)) {
@@ -191,8 +206,6 @@ function draw(now) {
     if (shown) drawOverlay(shown, (x, y) => [ox + (1 - x) * dw, oy + y * dh], dw);
   }
   updateChip();
-  if (performance.now() < settleUntil) requestAnimationFrame(draw);
-  else drawing = false;
 }
 
 function drawOverlay(o, P, dw) {
