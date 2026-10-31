@@ -8,7 +8,7 @@ never captures pixels.
 ## What you see
 
 - **Timer bar** (always on top): clock, status ("On your book", "Back in 1:42", "Distracted"), and
-  buttons for start/pause, step away, the CAT calculator and the main window. Drag it anywhere;
+  buttons for start/pause, step away, the CAT calculator and the main window, and a ring that fills as the block runs. Drag it anywhere; set its resting opacity in Settings → Shortcuts (it turns fully visible on hover);
   double- or right-click opens the main window. Ctrl+Alt+L makes it click-through.
 - **Main window** (Ctrl+Alt+O): your live camera with the tracking drawn over it — eye outlines,
   irises, a gaze arrow and a plain-language label ("Looking at your book", 87 %). Below it the session
@@ -42,7 +42,7 @@ flowchart LR
 - **Gaze**: YuNet finds the face and 5 points; the MediaPipe iris model reads each eye (contour,
   iris centre, openness). Twelve features (head yaw/pitch/roll, iris x/y per eye, eye openness, face
   size and position) feed a small per-user classifier trained by calibration.
-- **Calibration** (main window → Calibrate, ~15 s): follow a dot on the screen, read your book, then
+- **Calibration** (main window → Calibrate, ~15 s): follow a dot that lands on each spot with a soft note (beats keep time on the other steps), read your book, then
   look around the room. Redo it when you move the laptop. Uncalibrated, LockIn falls back to head pose.
 - **Sites**: the first visit to a blocked site warns; the second visit, or staying past the limit,
   rings the alarm. Ask-sites (YouTube, Reddit) get "for study or distraction?". App names such as
@@ -121,5 +121,6 @@ Debug builds serve `assets/` from disk: edit HTML/CSS/JS and press F5 in the mai
 - YuNet face detector (OpenCV Zoo, MIT); input shape relaxed for 256×192.
 - MediaPipe Iris landmark model (Apache-2.0), ONNX conversion via PINTO_model_zoo; see `models/iris.NOTICE`.
 - NanoDet-Plus (OpenCV Zoo, Apache-2.0).
+- Icons: [Phosphor](https://phosphoricons.com) (MIT), subset in `assets/fonts/`.
 - Inference: [tract](https://github.com/sonos/tract). Native UI: [egui](https://github.com/emilk/egui).
   Main window: [wry](https://github.com/tauri-apps/wry) on WebView2.
