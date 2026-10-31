@@ -1,0 +1,37 @@
+[package]
+name = "lockin"
+version = "0.1.0"
+edition = "2021"
+description = "Local, low-RAM study focus tracker overlay"
+
+[dependencies]
+eframe = { version = "0.37.0", default-features = false, features = ["glow", "default_fonts"] }
+image = { version = "0.25.10", default-features = false, features = ["gif", "png", "jpeg"] }
+rodio = { version = "0.23.0", default-features = false, features = ["playback", "symphonia-mp3", "symphonia-wav"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tract-onnx = "0.23.9"
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_System_Time",
+    "Win32_System_Com",
+    "Win32_System_Variant",
+    "Win32_System_Ole",
+    "Win32_System_Threading",
+    "Win32_Media_MediaFoundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Accessibility",
+    "Win32_Graphics_Gdi",
+] }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# Inference is unusably slow unoptimised; keep debug builds usable.
+[profile.dev.package."*"]
+opt-level = 3
