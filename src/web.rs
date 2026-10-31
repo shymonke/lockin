@@ -18,11 +18,17 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use wry::http::{header::CONTENT_TYPE, Request, Response};
-use wry::{Rect, WebView, WebViewBuilder};
+use wry::{Rect, WebContext, WebView, WebViewBuilder, WebViewBuilderExtWindows};
 
 static INDEX: &str = include_str!("../assets/index.html");
 static CSS: &str = include_str!("../assets/app.css");
 static JS: &str = include_str!("../assets/app.js");
+
+/// Keep WebView2 small: one renderer, no GPU process (the page is a canvas at ~15 fps, software
+/// raster is plenty), no background services. wry's defaults (no mini menu / SmartScreen) kept.
+const BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
+    --disable-gpu --disable-gpu-compositing --renderer-process-limit=1 --disable-background-networking \
+    --disable-component-update --disable-sync --no-first-run --disable-breakpad";
 
 /// Background matches the page so opening never flashes white.
 const BG: (u8, u8, u8) = (20, 23, 29);
@@ -205,7 +211,12 @@ fn run(slot: Arc<AtomicIsize>, shared: Arc<Shared>) {
 
         let serve_shared = shared.clone();
         let ipc_shared = shared.clone();
-        let built = WebViewBuilder::new()
+        // Profile under %APPDATA%\LockIn instead of beside the exe.
+        let mut context = WebContext::new(Some(crate::config::data_dir().join("webview")));
+        let built = WebViewBuilder::new_with_web_context(&mut context)
+            .with_additional_browser_args(BROWSER_ARGS)
+            .with_browser_accelerator_keys(cfg!(debug_assertions))
+            .with_default_context_menus(cfg!(debug_assertions))
             .with_url("lockin://localhost/index.html")
             .with_background_color((BG.0, BG.1, BG.2, 255))
             .with_custom_protocol("lockin".into(), move |_, req| serve(&serve_shared, &req))

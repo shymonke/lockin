@@ -82,6 +82,7 @@ function render() {
 
   cal.update();
   if (sheet.open) sheet.refresh();
+  if (!drawing) updateChip();
 }
 
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
@@ -107,11 +108,13 @@ async function previewLoop() {
         showEmpty(p.error);
       } else if (p.seq !== null && p.seq !== frameSeq) {
         const blob = await (await fetch(`frame?seq=${p.seq}`, { cache: "no-store" })).blob();
+        if (frame) frame.close();
         frame = await createImageBitmap(blob);
         frameSeq = p.seq;
         target = p.overlay;
         lastPreview = performance.now();
         showEmpty(null);
+        wake();
       } else if (p.seq === null) {
         showEmpty(S && S.cam.error ? S.cam.error : "Starting your camera…");
       }
@@ -140,7 +143,23 @@ function lerpOverlay(a, b, k) {
   return out;
 }
 
-function draw() {
+// Redraw only after a new frame and while the overlay glides (~0.5 s), at most 30 fps.
+let settleUntil = 0, drawing = false, lastDraw = 0;
+function wake() {
+  settleUntil = performance.now() + 500;
+  if (!drawing) {
+    drawing = true;
+    requestAnimationFrame(draw);
+  }
+}
+addEventListener("resize", wake);
+
+function draw(now) {
+  if (now - lastDraw < 32) {
+    requestAnimationFrame(draw);
+    return;
+  }
+  lastDraw = now;
   const dpr = devicePixelRatio || 1;
   const w = view.clientWidth, h = view.clientHeight;
   if (view.width !== Math.round(w * dpr) || view.height !== Math.round(h * dpr)) {
@@ -172,7 +191,8 @@ function draw() {
     if (shown) drawOverlay(shown, (x, y) => [ox + (1 - x) * dw, oy + y * dh], dw);
   }
   updateChip();
-  requestAnimationFrame(draw);
+  if (performance.now() < settleUntil) requestAnimationFrame(draw);
+  else drawing = false;
 }
 
 function drawOverlay(o, P, dw) {
@@ -655,4 +675,4 @@ addEventListener("resize", () => tour.active && tour.show());
 
 poll();
 previewLoop();
-requestAnimationFrame(draw);
+wake();
