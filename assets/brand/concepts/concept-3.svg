@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title desc" color="#E4E7EC">
+  <title id="title">Calibration gate</title>
+  <desc id="desc">Two opposing brackets align around a quiet central focus bar.</desc>
+  <path d="M27 11H16a5 5 0 0 0-5 5v32a5 5 0 0 0 5 5h11M37 11h11a5 5 0 0 1 5 5v32a5 5 0 0 1-5 5H37" fill="none" stroke="currentColor" stroke-width="7" stroke-linecap="round"/>
+  <path d="M32 23v18" fill="none" stroke="currentColor" stroke-width="7" stroke-linecap="round"/>
+</svg>

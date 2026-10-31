@@ -1,0 +1,2 @@
+#define IDI_LOCKIN 1
+IDI_LOCKIN ICON "lockin.ico"
