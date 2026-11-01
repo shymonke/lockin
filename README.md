@@ -19,6 +19,14 @@ never captures pixels.
   shows only the tracking lines (screen sharing).
 - **Alert cards**: warnings, alarms and questions with painted cats (scuba cat and friends) or your
   own GIFs, plus a built-in or custom sound.
+- **Tasks** (Pomodoro style): one list for the day, each task with an estimate in pomodoros. The
+  active task sits on the timer bar with its pomodoro dots (filled = done, hollow = still estimated,
+  amber = over the estimate), a check-off button and "+" for quick add (a Task/Idea chip or
+  Shift+Enter files it as a side idea for after studying). When a focus block ends, LockIn asks
+  "Done with …?" (Done, or carry it into the next block); ticking a task off mid-block makes the next
+  one active straight away. Distraction alarms are counted against the active task.
+- **History**: a GitHub-style year of focus days in the main window (pomodoros per day, streak).
+  Tasks, ideas and history live in `tasks.json` next to the settings.
 - **Calculator** (Ctrl+Alt+C): a small on-screen calculator with memory keys, styled like the basic
   calculators used in computer-based tests.
 
@@ -42,9 +50,12 @@ flowchart LR
 ```
 
 - **Gaze**: YuNet finds the face; MediaPipe Face Landmarker reads a 478-point mesh on it (eye
-  outlines, irises, head pose) and 52 blendshapes (eye-look up/down/in/out). Fourteen features (head
+  outlines, irises, head pose) and 52 blendshapes (eye-look up/down/in/out). Fifteen features (head
   yaw/pitch/roll, iris x/y per eye, eye openness, face size and position, horizontal and vertical eye
-  look) feed a small per-user classifier trained by calibration.
+  look, gaze pitch) feed a small per-user classifier trained by calibration. While the main window
+  previews (12 fps) and during calibration, each frame's crop comes from the previous mesh and YuNet
+  only runs to find the face again; those frames also update the timer bar's label, and a changed
+  label is re-checked within 0.7 s instead of waiting for the next interval.
 - **Phone and person**: RTMDet-tiny (COCO) runs only when the face is lost or the head has been down
   for a while; two phone sightings in a row ring the phone alarm.
 - **Calibration** (main window → Calibrate, ~20 s): the main window steps aside and the timer bar

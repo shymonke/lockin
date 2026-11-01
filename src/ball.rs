@@ -1,6 +1,10 @@
 //! Screen calibration: the timer pill folds into the gaze-coloured ball, glides across the monitor
 //! (the user follows it with their eyes), rests in the middle for a head nod, then flies home and
 //! unfolds back into the pill. The vision worker samples while the ball travels.
+//!
+//! During the tour the pill window shrinks to a small click-through square that follows the ball.
+//! The ball is drawn in screen coordinates against the window's actual position, so it stays put
+//! on screen even when a move and a resize land a frame apart.
 
 use crate::theme;
 use eframe::egui::{self, pos2, CornerRadius, Pos2, Rect, Stroke, StrokeKind, Ui, Vec2, ViewportCommand};
@@ -16,20 +20,23 @@ const BEAT: f32 = 1.0;
 const MOVE: f32 = 0.42;
 /// Resting in the middle while the user tips their head down to the keyboard and back.
 const NOD_BEATS: usize = 3;
-/// Window frames to wait after resizing/moving before the pill trusts its own position again.
+/// Time for the OS to apply the final pill size/position before the pill trusts its own position.
 const SETTLE: f32 = 0.2;
+/// Longest wait in the middle for the worker's result (camera gone) before flying home anyway.
 const HOLD_MAX: f32 = 6.0;
-pub const BALL_WIN: f32 = 76.0;
 const R: f32 = 11.0;
+/// Ball window side. The window trails the ball by a frame or two while it glides, so it is
+/// large enough that the ball never leaves it mid-move.
+const BALL_WIN: f32 = 360.0;
 
 /// Seconds of sampling the vision worker needs for the screen target: six spots plus the nod.
 pub const SAMPLE_SECS: f32 = DOTS.len() as f32 * BEAT + NOD_BEATS as f32 * BEAT;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Stage {
-    /// Pill folding into the ball inside the pill window.
+    /// Pill folding into the ball.
     Fold,
-    /// Ball window flying from the pill to the first spot.
+    /// Ball flying from the pill to the first spot.
     Out,
     /// Following the spots and the nod (vision sampling runs).
     Tour,
@@ -37,7 +44,7 @@ enum Stage {
     Hold,
     /// Flying back to where the pill lives.
     Home,
-    /// Ball unfolding into the pill inside the pill window.
+    /// Ball unfolding into the pill.
     Unfold,
     /// Window is pill-sized again; wait for the OS to apply it.
     Settle,
@@ -64,9 +71,15 @@ pub enum Step {
 }
 
 fn ease(t: f32) -> f32 {
-    // cubic-bezier(.3,.7,.2,1)-like ease-out, as on the old CSS dot.
+    // Ease-out like the old CSS dot's cubic-bezier(.3,.7,.2,1).
     let t = t.clamp(0.0, 1.0);
     1.0 - (1.0 - t).powi(3)
+}
+
+/// Smoothstep for the ball's glides: half the peak speed of `ease`, so the window keeps up.
+fn glide(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 fn lerp(a: Pos2, b: Pos2, t: f32) -> Pos2 {
@@ -75,14 +88,7 @@ fn lerp(a: Pos2, b: Pos2, t: f32) -> Pos2 {
 
 impl Ball {
     pub fn new(home: Pos2, monitor: Vec2) -> Ball {
-        Ball {
-            stage: Stage::Fold,
-            since: Instant::now(),
-            home,
-            monitor,
-            last_beat: None,
-            done_sampling: false,
-        }
+        Ball { stage: Stage::Fold, since: Instant::now(), home, monitor, last_beat: None, done_sampling: false }
     }
 
     /// The worker reported the screen step finished (or failed).
@@ -103,8 +109,17 @@ impl Ball {
         self.since = Instant::now();
     }
 
-    fn place(ctx: &egui::Context, center: Pos2) {
-        ctx.send_viewport_cmd(ViewportCommand::OuterPosition(center - Vec2::splat(BALL_WIN / 2.0)));
+    /// Move the ball window over screen point `c` and draw the ball there.
+    fn show_at(&self, ui: &Ui, p: &egui::Painter, c: Pos2, since_pulse: f32, breathe: Option<f32>) {
+        ui.ctx().send_viewport_cmd(ViewportCommand::OuterPosition(c - Vec2::splat(BALL_WIN / 2.0)));
+        self.draw(p, self.local(ui, c), since_pulse, breathe);
+    }
+
+    /// Screen point (points) → this frame's local coordinates, using where the OS has the window now.
+    fn local(&self, ui: &Ui, screen: Pos2) -> Pos2 {
+        // Painter coordinates are relative to the client area, so use its origin, not the frame's.
+        let at = ui.ctx().input(|i| i.viewport().inner_rect.map(|r| r.min)).unwrap_or(self.home);
+        ui.max_rect().min + (screen - at)
     }
 
     /// Advance and draw one frame. `pill` is the pill window size.
@@ -114,25 +129,30 @@ impl Ball {
         let t = self.since.elapsed().as_secs_f32();
         let mut out = Vec::new();
         let p = ui.painter().clone();
-        let origin = ui.max_rect().min;
         match self.stage {
-            Stage::Fold | Stage::Unfold => {
-                let k = ease(t / MORPH);
-                let k = if self.stage == Stage::Fold { k } else { 1.0 - k };
-                let full = Rect::from_min_size(origin, pill).shrink(2.0);
+            Stage::Fold | Stage::Unfold | Stage::Settle => {
+                // Settle keeps drawing the bare pill shell so nothing flickers before the pill
+                // takes over.
+                let k = match self.stage {
+                    Stage::Fold => ease(t / MORPH),
+                    Stage::Unfold => 1.0 - ease(t / MORPH),
+                    _ => 0.0,
+                };
+                let full = Rect::from_min_size(self.local(ui, self.home), pill).shrink(2.0);
                 let ball = Rect::from_center_size(full.center(), Vec2::splat(R * 2.0));
                 let rect = Rect::from_min_max(lerp(full.min, ball.min, k), lerp(full.max, ball.max, k));
                 let fill = theme::SURFACE.lerp_to_gamma(theme::GAZE, k);
                 p.rect_filled(rect, CornerRadius::same(255), fill);
                 p.rect_stroke(rect, CornerRadius::same(255), Stroke::new(1.0, theme::LINE.gamma_multiply(1.0 - k)), StrokeKind::Inside);
-                if t >= MORPH {
-                    if self.stage == Stage::Fold {
+                match self.stage {
+                    Stage::Fold if t >= MORPH => {
                         ctx.send_viewport_cmd(ViewportCommand::InnerSize(Vec2::splat(BALL_WIN)));
-                        Self::place(&ctx, self.pill_center(pill));
+                        ctx.send_viewport_cmd(ViewportCommand::OuterPosition(self.pill_center(pill) - Vec2::splat(BALL_WIN / 2.0)));
                         self.go(Stage::Out);
-                    } else {
-                        self.go(Stage::Settle);
                     }
+                    Stage::Unfold if t >= MORPH => self.go(Stage::Settle),
+                    Stage::Settle if t >= SETTLE => return vec![Step::Finished],
+                    _ => {}
                 }
             }
             Stage::Out | Stage::Home => {
@@ -141,8 +161,7 @@ impl Ball {
                 } else {
                     (self.spot(DOTS.len() - 1), self.pill_center(pill))
                 };
-                Self::place(&ctx, lerp(from, to, ease(t / FLY)));
-                self.draw(&p, origin, f32::INFINITY, None);
+                self.show_at(ui, &p, lerp(from, to, glide(t / FLY)), f32::INFINITY, None);
                 if t >= FLY {
                     if self.stage == Stage::Out {
                         self.last_beat = None;
@@ -165,37 +184,29 @@ impl Ball {
                 } else if beat == 0 {
                     (self.spot(0), Some(0.0))
                 } else {
-                    (lerp(self.spot(beat - 1), self.spot(beat), ease(in_beat / MOVE)), Some(MOVE))
+                    (lerp(self.spot(beat - 1), self.spot(beat), glide(in_beat / MOVE)), Some(MOVE))
                 };
-                Self::place(&ctx, center);
                 let since_pulse = pulse_at.map(|at| in_beat - at).filter(|d| *d >= 0.0);
                 if self.stage == Stage::Tour && beat < spots && since_pulse.is_some() && self.last_beat != Some(beat) {
                     self.last_beat = Some(beat);
                     out.push(Step::Note(NOTES[beat]));
                 }
                 let breathe = (beat >= spots || self.stage == Stage::Hold).then(|| (t * std::f32::consts::PI).sin().abs());
-                self.draw(&p, origin, since_pulse.unwrap_or(f32::INFINITY), breathe);
+                self.show_at(ui, &p, center, since_pulse.unwrap_or(f32::INFINITY), breathe);
                 if self.stage == Stage::Tour && t >= SAMPLE_SECS {
                     self.go(Stage::Hold);
                 }
                 let held = self.stage == Stage::Hold && self.since.elapsed().as_secs_f32() >= HOLD_MAX;
-                // `held`: the worker never answered (camera gone); give the pill back anyway.
                 if (self.done_sampling && self.stage == Stage::Hold) || held {
                     self.go(Stage::Home);
-                }
-            }
-            Stage::Settle => {
-                if t >= SETTLE {
-                    return vec![Step::Finished];
                 }
             }
         }
         out
     }
 
-    /// The ball centred in the ball window: halo, a thump on the beat and a fading ping ring.
-    fn draw(&self, p: &egui::Painter, origin: Pos2, since_pulse: f32, breathe: Option<f32>) {
-        let c = origin + Vec2::splat(BALL_WIN / 2.0);
+    /// The ball at `c` (local): halo, a thump on the beat and a fading ping ring.
+    fn draw(&self, p: &egui::Painter, c: Pos2, since_pulse: f32, breathe: Option<f32>) {
         let thump = if since_pulse < 0.3 { (1.0 - (since_pulse / 0.3 - 0.4).abs() / 0.6).max(0.0) } else { 0.0 };
         let halo = 6.0 + 4.0 * thump.max(breathe.unwrap_or(0.0));
         let halo_alpha = 0.2 + 0.1 * thump;
@@ -204,9 +215,7 @@ impl Ball {
         if since_pulse < 0.6 {
             let k = since_pulse / 0.6;
             let ring = (R + 6.0) * (1.0 + 1.6 * k);
-            let ring = ring.min(BALL_WIN / 2.0 - 1.0);
             p.circle_stroke(c, ring, Stroke::new(2.0, theme::GAZE.gamma_multiply(0.8 * (1.0 - k))));
         }
     }
 }
-

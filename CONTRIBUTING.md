@@ -19,9 +19,8 @@ cargo test --release
 ## Pull requests
 
 - Keep one change per PR and describe what you tested by hand (camera, timer bar, main window).
-- Run `cargo fmt`, `cargo clippy --release` and `cargo test --release` before pushing; CI runs the
-  same on Windows.
-- Privacy is a hard rule: no network calls, telemetry, or saving camera frames or screenshots.
+- Run `cargo clippy --release` and `cargo test --release` before pushing; CI runs the same on
+  Windows. Match the surrounding code style (the code uses wide lines and isn't run through rustfmt).
 - Keep memory and CPU use low; mention any measurable change in the PR.
 - New models, fonts, images or vendored binaries need a compatible license. Add the license file and
   an entry in `THIRD_PARTY_NOTICES.md` (and `models/NOTICE.md` for models).

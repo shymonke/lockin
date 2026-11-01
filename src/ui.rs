@@ -68,6 +68,19 @@ fn text_icon_button(ui: &mut Ui, rect: Rect, id: &str, tip: &str, text: &str, in
     r.clicked()
 }
 
+/// Small round button with a painted check mark (the UI fonts have no ✓ glyph).
+fn check_button(ui: &mut Ui, rect: Rect, tip: &str) -> bool {
+    let r = ui.interact(rect, ui.scope_id().with("task-done"), Sense::click()).on_hover_text(tip);
+    let hover = ui.ctx().animate_bool_with_time(r.id, r.hovered(), 0.15);
+    let p = ui.painter();
+    p.circle_filled(rect.center(), rect.width() / 2.0, theme::RAISED.gamma_multiply(hover));
+    let c = rect.center();
+    let ink = Stroke::new(1.8, theme::FOCUS.lerp_to_gamma(theme::TEXT, hover));
+    p.line_segment([pos2(c.x - 4.5, c.y + 0.5), pos2(c.x - 1.5, c.y + 3.5)], ink);
+    p.line_segment([pos2(c.x - 1.5, c.y + 3.5), pos2(c.x + 4.5, c.y - 3.5)], ink);
+    r.clicked()
+}
+
 /// Arc from 12 o'clock, clockwise, covering `frac` of the circle.
 fn arc(p: &egui::Painter, c: egui::Pos2, r: f32, frac: f32, stroke: Stroke) {
     let frac = frac.clamp(0.0, 1.0);
@@ -148,7 +161,7 @@ impl App {
 
         let Some(task) = self.tasks.active().cloned() else { return };
         let check = Rect::from_center_size(pos2(plus.left() - 15.0, rect.center().y), vec2(20.0, 20.0));
-        if text_icon_button(ui, check, "task-done", "Mark active task done", "✓", theme::FOCUS) {
+        if check_button(ui, check, "Mark active task done") {
             self.complete_task_now(task.id);
         }
 
