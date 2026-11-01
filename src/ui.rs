@@ -11,7 +11,7 @@ use eframe::egui::{
     ViewportCommand, ViewportId,
 };
 
-pub const PILL: egui::Vec2 = vec2(352.0, 60.0);
+pub const PILL: egui::Vec2 = vec2(520.0, 60.0);
 
 fn mmss(secs: f64) -> String {
     let s = secs.max(0.0).ceil() as u64;
@@ -36,6 +36,14 @@ fn icon_button(ui: &mut Ui, rect: Rect, id: &str, tip: &str, glyph: char, ink: O
     r.clicked()
 }
 
+fn text_icon_button(ui: &mut Ui, rect: Rect, id: &str, tip: &str, text: &str, ink: Color32) -> bool {
+    let r = ui.interact(rect, ui.scope_id().with(id), Sense::click()).on_hover_text(tip);
+    let hover = ui.ctx().animate_bool_with_time(r.id, r.hovered(), 0.15);
+    ui.painter().circle_filled(rect.center(), rect.width() / 2.0, theme::RAISED.gamma_multiply(hover));
+    ui.painter().text(rect.center(), Align2::CENTER_CENTER, text, strong(15.0), ink.lerp_to_gamma(theme::TEXT, hover));
+    r.clicked()
+}
+
 /// Arc from 12 o'clock, clockwise, covering `frac` of the circle.
 fn arc(p: &egui::Painter, c: egui::Pos2, r: f32, frac: f32, stroke: Stroke) {
     let frac = frac.clamp(0.0, 1.0);
@@ -53,6 +61,117 @@ fn arc(p: &egui::Painter, c: egui::Pos2, r: f32, frac: f32, stroke: Stroke) {
 }
 
 impl App {
+    /// The task strip deliberately lives outside the timer/button layout so concurrent pill work
+    /// only needs to preserve this one call and its rectangle.
+    fn pill_task_ui(&mut self, ui: &mut Ui, rect: Rect) {
+        let ctx = ui.ctx().clone();
+        if self.pill_adding {
+            let toggle = Rect::from_min_size(pos2(rect.right() - 61.0, rect.top()), vec2(58.0, rect.height()));
+            let edit_rect = Rect::from_min_max(rect.min, pos2(toggle.left() - 5.0, rect.bottom()));
+            let id = ui.scope_id().with("pill-task-add-field");
+            let response = ui.put(
+                edit_rect,
+                egui::TextEdit::singleline(&mut self.pill_add_text)
+                    .id(id)
+                    .hint_text(if self.pill_add_idea { "Park an idea…" } else { "Add a task…" })
+                    .font(FontId::proportional(11.5))
+                    .frame(egui::Frame::NONE)
+                    .margin(vec2(2.0, 1.0)),
+            );
+            if !response.has_focus() {
+                response.request_focus();
+                ctx.send_viewport_cmd(ViewportCommand::Focus);
+            }
+            let chip = ui.interact(toggle, ui.scope_id().with("pill-task-kind"), Sense::click());
+            ui.painter().rect_filled(toggle, CornerRadius::same(255), theme::RAISED);
+            ui.painter().text(
+                toggle.center(),
+                Align2::CENTER_CENTER,
+                if self.pill_add_idea { "Idea" } else { "Task" },
+                FontId::proportional(10.5),
+                if self.pill_add_idea { theme::CAUTION } else { theme::GAZE },
+            );
+            if chip.clicked() {
+                self.pill_add_idea = !self.pill_add_idea;
+            }
+            let (enter, shift, escape) = ctx.input(|i| (i.key_pressed(egui::Key::Enter), i.modifiers.shift, i.key_pressed(egui::Key::Escape)));
+            if enter {
+                let idea = self.pill_add_idea || shift;
+                if idea {
+                    self.tasks.add_idea(&self.pill_add_text, crate::tasks::now_secs());
+                } else {
+                    self.tasks.add_task(&self.pill_add_text, 1, crate::tasks::now_secs());
+                }
+                self.tasks.save();
+                self.finish_pill_add();
+            } else if escape {
+                self.finish_pill_add();
+            }
+            return;
+        }
+
+        let plus = Rect::from_center_size(pos2(rect.right() - 10.0, rect.center().y), vec2(20.0, 20.0));
+        if self.pill_return_hwnd == 0 && ui.rect_contains_pointer(plus) {
+            // Capture on hover, before Windows activates the pill for the click.
+            self.pill_return_hwnd = unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow().0 as isize };
+        }
+        if text_icon_button(ui, plus, "task-add", "Quick add task or idea", "+", theme::MUTED) {
+            self.pill_adding = true;
+            self.pill_add_text.clear();
+            self.pill_add_idea = false;
+            ctx.request_repaint();
+        }
+
+        let Some(task) = self.tasks.active().cloned() else { return };
+        let check = Rect::from_center_size(pos2(plus.left() - 15.0, rect.center().y), vec2(20.0, 20.0));
+        if text_icon_button(ui, check, "task-done", "Mark active task done", "✓", theme::FOCUS) {
+            self.complete_task_now(task.id);
+        }
+
+        let dots = task.estimate.max(task.actual).min(12);
+        let dot_w = dots as f32 * 7.0 + if task.estimate.max(task.actual) > 12 { 20.0 } else { 0.0 };
+        let right = check.left() - 6.0;
+        let dot_x = right - dot_w;
+        for i in 0..dots {
+            let c = pos2(dot_x + 3.0 + i as f32 * 7.0, rect.center().y);
+            if i < task.actual.min(task.estimate) {
+                ui.painter().circle_filled(c, 2.2, theme::FOCUS);
+            } else if i < task.estimate {
+                ui.painter().circle_stroke(c, 2.2, Stroke::new(1.0, theme::MUTED));
+            } else {
+                ui.painter().circle_filled(c, 2.2, theme::CAUTION);
+            }
+        }
+        if task.estimate.max(task.actual) > 12 {
+            ui.painter().text(pos2(right - 17.0, rect.center().y), Align2::LEFT_CENTER, format!("+{}", task.estimate.max(task.actual) - 12), FontId::proportional(9.5), theme::MUTED);
+        }
+        let title_width = (dot_x - rect.left() - 4.0).max(15.0);
+        let original_chars = task.title.chars().count();
+        let mut title = task.title;
+        while title.chars().count() > 1 {
+            let shown = format!("{title}…");
+            let width = ctx.fonts_mut(|f| f.layout_no_wrap(shown, FontId::proportional(11.5), theme::TEXT).size().x);
+            if width <= title_width {
+                break;
+            }
+            title.pop();
+        }
+        if title.chars().count() < original_chars {
+            title.push('…');
+        }
+        ui.painter().text(rect.left_center(), Align2::LEFT_CENTER, title, FontId::proportional(11.5), theme::MUTED);
+    }
+
+    fn finish_pill_add(&mut self) {
+        self.pill_adding = false;
+        self.pill_add_text.clear();
+        if self.pill_return_hwnd != 0 {
+            let hwnd = windows::Win32::Foundation::HWND(self.pill_return_hwnd as *mut core::ffi::c_void);
+            let _ = unsafe { windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow(hwnd) };
+            self.pill_return_hwnd = 0;
+        }
+    }
+
     fn status(&self) -> (Color32, String) {
         let brain = self.s.brainrot;
         if let Some(left) = self.pomo.brb {
@@ -146,7 +265,7 @@ impl App {
         // Clock and status as one vertically centred block.
         let text_x = rect.left() + 56.0;
         let clock = ctx.fonts_mut(|f| f.layout_no_wrap(mmss(self.pomo.remaining), display(24.0), theme::TEXT));
-        let mut sub = label;
+        let mut sub = if self.tasks.active().is_some() || self.pill_adding { String::new() } else { label };
         if self.pomo.block_added_secs > 0 && self.pomo.phase == Phase::Focus {
             sub = format!("{sub}   +{}m", self.pomo.block_added_secs.div_ceil(60));
         }
@@ -169,6 +288,8 @@ impl App {
         let (app, calc, brb, play) = (next(), next(), next(), next());
         let divider = play.left() - 8.0;
         p.line_segment([pos2(divider, cy - 13.0), pos2(divider, cy + 13.0)], Stroke::new(1.0, theme::LINE));
+        let task_rect = Rect::from_min_max(pos2(text_x + 1.0, top + clock.size().y + gap), pos2(divider - 7.0, top + clock.size().y + gap + 17.0));
+        self.pill_task_ui(ui, task_rect);
         if icon_button(ui, app, "app", "Open LockIn (Ctrl+Alt+O)", icon::APP, None) {
             self.open_dashboard();
         }
@@ -323,12 +444,20 @@ impl App {
                 }
             }
             Level::Ask => {
-                if ui.add(button("For study", true)).clicked() {
-                    self.answer_ask(true);
-                } else if ui.add(button("Distraction", false)).clicked() {
-                    self.answer_ask(false);
-                } else if let Some(a) = &mut self.alert {
-                    ui.checkbox(&mut a.remember, "Remember");
+                if self.alert.as_ref().is_some_and(|a| a.task_question.is_some()) {
+                    if ui.add(button("Done", true)).clicked() {
+                        self.answer_task_question(true);
+                    } else if ui.add(button("Carry on", false)).clicked() {
+                        self.answer_task_question(false);
+                    }
+                } else {
+                    if ui.add(button("For study", true)).clicked() {
+                        self.answer_ask(true);
+                    } else if ui.add(button("Distraction", false)).clicked() {
+                        self.answer_ask(false);
+                    } else if let Some(a) = &mut self.alert {
+                        ui.checkbox(&mut a.remember, "Remember");
+                    }
                 }
             }
             Level::Info => {

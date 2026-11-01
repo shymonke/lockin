@@ -38,6 +38,26 @@
     </dl>
   </section>
 
+  <section class="task-space" aria-label="Pomodoro tasks">
+    <div class="task-columns">
+      <div class="task-panel">
+        <div class="panel-head"><div><h2>Today’s tasks</h2><p>One task stays active through each focus block.</p></div></div>
+        <form class="task-add" id="task-add"><input id="task-title" maxlength="160" placeholder="Add a task…" aria-label="New task"><label>Estimate <input id="task-estimate" type="number" min="1" max="99" value="1"></label><button class="secondary" type="submit">Add</button></form>
+        <div class="task-list" id="task-list"></div>
+        <details class="done-today" id="done-today"><summary>Done today <span id="done-count">0</span></summary><div id="done-list"></div></details>
+      </div>
+      <div class="task-panel ideas-panel">
+        <div class="panel-head"><div><h2>Side ideas</h2><p>Park it now. Revisit it after studying.</p></div></div>
+        <form class="task-add idea-add" id="idea-add"><input id="idea-title" maxlength="160" placeholder="Something to look up…" aria-label="New side idea"><button class="secondary" type="submit">Add</button></form>
+        <div class="idea-list" id="idea-list"></div>
+      </div>
+    </div>
+    <div class="history-panel">
+      <div class="history-head"><div><h2 id="history-total">0 pomodoros in the last year</h2><p><span id="history-streak">0</span> day current streak</p></div><div class="heat-legend"><span>Less</span><i data-level="0"></i><i data-level="1"></i><i data-level="2"></i><i data-level="3"></i><i data-level="4"></i><span>More</span></div></div>
+      <div class="heat-wrap"><div class="heat-labels"><span>Mon</span><span>Wed</span><span>Fri</span></div><div class="heat-main"><div class="heat-months" id="heat-months"></div><div class="heatmap" id="heatmap"></div></div></div>
+    </div>
+  </section>
+
   <section class="session" aria-label="Session">
     <div class="clock">
       <div class="time" id="time">25:00</div>
@@ -114,6 +134,7 @@
 </div>
 
 <div class="toast" id="toast" role="status" hidden></div>
+<div class="heat-tip" id="heat-tip" hidden></div>
 <script src="app.js"></script>
 </body>
 </html>

@@ -81,6 +81,7 @@ function render() {
   }
   if (document.activeElement !== sel) sel.value = String(S.settings.camera_index);
 
+  renderTasks();
   cal.update();
   if (sheet.open) sheet.refresh();
   if (!drawing) updateChip();
@@ -95,6 +96,114 @@ function setButton(el, glyph, text) {
 }
 
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+/* ------------------------------------------------------------ tasks */
+
+const localDay = (date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+const parseDay = (s) => { const [y, m, d] = String(s).split("-").map(Number); return new Date(y, m - 1, d, 12); };
+const taskDots = (t) => {
+  const normal = Math.min(t.actual, t.estimate), left = Math.max(0, t.estimate - t.actual), extra = Math.max(0, t.actual - t.estimate);
+  return `<span>${"●".repeat(normal)}${"○".repeat(left)}</span>${extra ? `<span class="over">${"●".repeat(extra)}</span>` : ""}`;
+};
+
+function renderTasks() {
+  const data = S.task_data;
+  if (!data) return;
+  const editing = document.activeElement && document.activeElement.matches && document.activeElement.matches("[data-task-title]");
+  const key = JSON.stringify([data.tasks, data.ideas, data.active, data.history, data.today, data.streak]);
+  if (editing || renderTasks.key === key) return;
+  renderTasks.key = key;
+  const open = data.tasks.filter((t) => t.done_at === null);
+  $("#task-list").innerHTML = open.length ? open.map((t, i) => `
+    <div class="task-item ${t.id === data.active ? "active" : ""}" data-task="${t.id}">
+      <button class="task-check" data-task-action="complete" title="Mark done" aria-label="Mark ${esc(t.title)} done">✓</button>
+      <div class="task-copy"><input class="task-name" data-task-title value="${esc(t.title)}" maxlength="160" aria-label="Task title"><div class="task-meta">${taskDots(t)}<span>${t.actual}/${t.estimate} pomodoros</span><span>${t.distractions} distractions</span></div></div>
+      <div class="task-actions">
+        <button class="make-active ${t.id === data.active ? "on" : ""}" data-task-action="active" title="Make active" aria-label="Make active">${t.id === data.active ? "●" : "○"}</button>
+        <button data-task-action="up" title="Move up" aria-label="Move up" ${i === 0 ? "disabled" : ""}>↑</button><button data-task-action="down" title="Move down" aria-label="Move down" ${i === open.length - 1 ? "disabled" : ""}>↓</button>
+        <span class="estimate-step"><button data-task-action="estimate-down" aria-label="Decrease estimate">−</button><b>${t.estimate}</b><button data-task-action="estimate-up" aria-label="Increase estimate">+</button></span>
+        <button data-task-action="delete" title="Delete" aria-label="Delete task">×</button>
+      </div>
+    </div>`).join("") : `<p class="empty-note">Add the first thing you want to finish.</p>`;
+
+  const done = data.tasks.filter((t) => t.done_at !== null && localDay(new Date(t.done_at * 1000)) === data.today);
+  $("#done-count").textContent = done.length;
+  $("#done-list").innerHTML = done.length ? done.map((t) => `<div class="done-row" data-task="${t.id}"><span>${esc(t.title)}</span><span>${t.actual}/${t.estimate} pomodoros <button data-done-delete aria-label="Delete task">×</button></span></div>`).join("") : `<p class="empty-note">Nothing checked off yet.</p>`;
+  $("#idea-list").innerHTML = data.ideas.length ? data.ideas.map((idea) => `
+    <div class="idea-item ${idea.done ? "done" : ""}" data-idea="${idea.id}"><button class="idea-check" data-idea-action="toggle" aria-label="${idea.done ? "Reopen" : "Check off"}">✓</button><span class="idea-title">${esc(idea.title)}</span><button class="idea-delete" data-idea-action="delete" aria-label="Delete idea">×</button></div>`).join("") : `<p class="empty-note">Ideas can wait here without interrupting the block.</p>`;
+  renderHeatmap(data);
+}
+
+function renderHeatmap(data) {
+  const byDay = new Map(data.history.map((d) => [d.date, d]));
+  const today = parseDay(data.today), monday = new Date(today);
+  monday.setDate(monday.getDate() - ((monday.getDay() + 6) % 7) - 52 * 7);
+  const cells = [], months = [];
+  let lastMonth = -1, total = 0;
+  for (let i = 0; i < 53 * 7; i++) {
+    const date = new Date(monday); date.setDate(monday.getDate() + i);
+    const key = localDay(date), day = byDay.get(key) || { completed_focus: 0, earned_secs: 0 };
+    const n = day.completed_focus, level = n === 0 ? 0 : n <= 2 ? 1 : n <= 4 ? 2 : n <= 7 ? 3 : 4;
+    if (date <= today) total += n;
+    const col = Math.floor(i / 7);
+    if (date.getMonth() !== lastMonth && date.getDate() <= 7) {
+      months.push(`<span style="left:${col * 14}px">${date.toLocaleString(undefined, { month: "short" })}</span>`);
+      lastMonth = date.getMonth();
+    }
+    const future = date > today;
+    const tip = `${date.toLocaleDateString(undefined, { weekday: "short", year: "numeric", month: "short", day: "numeric" })} · ${n} pomodoro${n === 1 ? "" : "s"} · ${mins(day.earned_secs)} focus`;
+    cells.push(`<i class="heat-cell" data-level="${future ? 0 : level}" data-tip="${esc(tip)}" style="${future ? "opacity:.25" : ""}"></i>`);
+  }
+  $("#heat-months").innerHTML = months.join("");
+  $("#heatmap").innerHTML = cells.join("");
+  $("#history-total").textContent = `${total} pomodoro${total === 1 ? "" : "s"} in the last year`;
+  $("#history-streak").textContent = data.streak;
+  $(".history-head p").lastChild.textContent = ` day${data.streak === 1 ? "" : "s"} current streak`;
+}
+
+$("#task-add").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const title = $("#task-title").value.trim();
+  if (!title) return;
+  send("task-add", { title, estimate: Math.min(99, Math.max(1, Number($("#task-estimate").value) || 1)) });
+  $("#task-title").value = "";
+});
+$("#idea-add").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const title = $("#idea-title").value.trim();
+  if (!title) return;
+  send("idea-add", { title });
+  $("#idea-title").value = "";
+});
+$("#task-list").addEventListener("click", (e) => {
+  const button = e.target.closest("[data-task-action]"); if (!button) return;
+  const id = Number(button.closest("[data-task]").dataset.task), task = S.task_data.tasks.find((t) => t.id === id), action = button.dataset.taskAction;
+  if (action === "complete") send("task-complete", { id });
+  else if (action === "active") send("task-active", { id });
+  else if (action === "up" || action === "down") send("task-move", { id, delta: action === "up" ? -1 : 1 });
+  else if (action === "estimate-up" || action === "estimate-down") send("task-estimate", { id, estimate: task.estimate + (action === "estimate-up" ? 1 : -1) });
+  else if (action === "delete") send("task-delete", { id });
+});
+$("#task-list").addEventListener("change", (e) => {
+  if (!e.target.matches("[data-task-title]")) return;
+  const id = Number(e.target.closest("[data-task]").dataset.task), title = e.target.value.trim();
+  if (!title) { e.target.value = S.task_data.tasks.find((t) => t.id === id).title; return; }
+  send("task-rename", { id, title });
+});
+$("#task-list").addEventListener("keydown", (e) => { if (e.key === "Enter" && e.target.matches("[data-task-title]")) e.target.blur(); });
+$("#done-list").addEventListener("click", (e) => { if (e.target.closest("[data-done-delete]")) send("task-delete", { id: Number(e.target.closest("[data-task]").dataset.task) }); });
+$("#idea-list").addEventListener("click", (e) => {
+  const button = e.target.closest("[data-idea-action]"); if (!button) return;
+  const id = Number(button.closest("[data-idea]").dataset.idea);
+  send(button.dataset.ideaAction === "toggle" ? "idea-toggle" : "idea-delete", { id });
+});
+const heatTip = $("#heat-tip");
+$("#heatmap").addEventListener("pointermove", (e) => {
+  const cell = e.target.closest("[data-tip]"); if (!cell) return;
+  heatTip.textContent = cell.dataset.tip; heatTip.hidden = false;
+  heatTip.style.left = `${Math.min(innerWidth - heatTip.offsetWidth - 8, e.clientX + 12)}px`; heatTip.style.top = `${e.clientY + 14}px`;
+});
+$("#heatmap").addEventListener("pointerleave", () => { heatTip.hidden = true; });
 
 /* ------------------------------------------------------------ camera stage */
 
