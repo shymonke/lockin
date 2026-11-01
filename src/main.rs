@@ -13,6 +13,7 @@ mod policy;
 mod pomodoro;
 mod screen;
 mod theme;
+mod tray;
 mod ui;
 mod vision;
 mod web;
@@ -92,33 +93,35 @@ fn diag(images: &[String]) {
     let face = vision::FaceModel::load().expect("face model");
     println!("face model load {:.0} ms", t.elapsed().as_secs_f64() * 1e3);
     let t = Instant::now();
-    let eye = vision::EyeModel::load().expect("eye model");
-    println!("eye model load {:.0} ms", t.elapsed().as_secs_f64() * 1e3);
+    let mesh = vision::MeshModel::load().expect("face mesh model");
+    println!("face mesh model load {:.0} ms", t.elapsed().as_secs_f64() * 1e3);
     let t = Instant::now();
     let obj = vision::ObjectModel::load().expect("object model");
     println!("object model load {:.0} ms", t.elapsed().as_secs_f64() * 1e3);
     let report = |f: &camera::Frame| {
         let t = Instant::now();
         let d = face.detect(f).unwrap();
-        let eyes = d.as_ref().and_then(|d| eye.detect(f, d).unwrap());
+        let m = d.as_ref().and_then(|d| mesh.detect(f, d).unwrap());
         let l1 = t.elapsed().as_secs_f64() * 1e3;
         let t = Instant::now();
         let o = obj.detect(f).unwrap();
         let l2 = t.elapsed().as_secs_f64() * 1e3;
         match d {
             Some(d) => {
-                let gaze = eyes.as_ref().map(|e| e.direction());
-                let overlays = eyes.as_ref().map(|e| e.overlays()).unwrap_or_default();
-                let classified = eyes
+                let gaze = m.as_ref().map(|m| m.direction());
+                let overlays = m.as_ref().map(|m| m.overlays()).unwrap_or_default();
+                let feature = m.as_ref().map(|m| vision::feature_sample(&d, m));
+                let classified = feature
                     .as_ref()
-                    .and_then(|e| policy::classify_gaze_features(&vision::feature_sample(&d, e), &calibration))
+                    .and_then(|s| policy::classify_gaze_features(s, &calibration))
                     .unwrap_or((policy::classify_gaze(d.pose(), &calibration), 0.45));
                 println!(
-                    "  face {:.2} rect {:?} head {:?} gaze {:?} label {:?} confidence {:.2} | person {:.2} phone {:.2} | L1+eyes {l1:.1} ms L2 {l2:.1} ms",
+                    "  face {:.2} rect {:?} head {:?} gaze {:?} look {:?} label {:?} confidence {:.2} | person {:.2} phone {:.2} | L1+mesh {l1:.1} ms L2 {l2:.1} ms",
                     d.score,
                     d.rect.map(|v| (v * 100.0).round() / 100.0),
-                    d.head().map(|v| (v * 10.0).round() / 10.0),
+                    m.as_ref().map(|m| m.head().map(|v| (v * 10.0).round() / 10.0)),
                     gaze.map(|g| g.map(|v| (v * 100.0).round() / 100.0)),
+                    feature.as_ref().map(|s| [s.values[12], s.values[13]].map(|v| (v * 100.0).round() / 100.0)),
                     classified.0,
                     classified.1,
                     o.person,
@@ -129,7 +132,7 @@ fn diag(images: &[String]) {
                 }
             }
             None => println!(
-                "  no face eyes 0 head None gaze None label Absent confidence 1.00 | person {:.2} phone {:.2} | L1+eyes {l1:.1} ms L2 {l2:.1} ms",
+                "  no face, label Absent confidence 1.00 | person {:.2} phone {:.2} | L1+mesh {l1:.1} ms L2 {l2:.1} ms",
                 o.person, o.phone
             ),
         }

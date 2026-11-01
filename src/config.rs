@@ -18,21 +18,17 @@ pub struct Pose {
     pub center: [f32; 2],
 }
 
-pub const GAZE_FEATURES: usize = 12;
+/// Head yaw/pitch/roll (degrees), iris x/y per eye, eye openness per eye, face area, face centre
+/// x/y, and the averaged horizontal/vertical eye-look blendshapes.
+pub const GAZE_FEATURES: usize = 14;
 
 /// One eye/head observation used by the per-user gaze classifier.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct FeatureSample {
-    /// yaw/pitch/roll degrees, two iris x/y ratios, two openness ratios,
-    /// face area and face centre x/y.
-    pub values: [f32; GAZE_FEATURES],
-}
-
-impl Default for FeatureSample {
-    fn default() -> Self {
-        Self { values: [0.0; GAZE_FEATURES] }
-    }
+    /// `GAZE_FEATURES` values in the order above. A `Vec` rather than an array so settings saved
+    /// with an older feature set still parse; `Settings::load` drops those samples.
+    pub values: Vec<f32>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -44,6 +40,16 @@ pub struct Calibration {
     pub screen_samples: Vec<FeatureSample>,
     pub book_samples: Vec<FeatureSample>,
     pub away_samples: Vec<FeatureSample>,
+}
+
+impl Calibration {
+    /// Samples from an older feature set cannot be compared with new ones; dropping them makes the
+    /// dashboard show those targets as not calibrated, so the user recalibrates.
+    fn drop_stale_samples(&mut self) {
+        for samples in [&mut self.screen_samples, &mut self.book_samples, &mut self.away_samples] {
+            samples.retain(|s| s.values.len() == GAZE_FEATURES);
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -340,7 +346,9 @@ fn save<T: Serialize>(name: &str, value: &T) {
 
 impl Settings {
     pub fn load() -> Self {
-        load("settings.json")
+        let mut s: Self = load("settings.json");
+        s.calibration.drop_stale_samples();
+        s
     }
     pub fn save(&self) {
         save("settings.json", self);

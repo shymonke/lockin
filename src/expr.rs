@@ -1,4 +1,4 @@
-//! Tiny math.js-compatible evaluator for the CAT calculator.
+//! Tiny math.js-compatible evaluator for the calculator.
 //! Covers exactly what the calculator feeds it: numbers, `i`, `Infinity`, `NaN`, `sqrt(..)`,
 //! `+ - * /`, unary minus, parentheses and implicit multiplication (`(-5)3`, `2i`).
 //! Real results format like JavaScript `Number#toString`; complex ones like math.js `Complex#format`.

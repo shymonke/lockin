@@ -698,7 +698,7 @@ const STEPS = [
   { el: "#calibrate", title: "Teach it your desk", text: "Calibrate once: follow a dot on the screen, read your book, then look away. Fifteen seconds, and it learns your setup." },
   { el: ".session", title: "Start a focus block", text: "Monitoring only runs while a focus block counts down. The timer bar at the top of your screen shows the same clock.", keys: [["P", "Start or pause"]] },
   { el: "#brb", title: "Stepping away", text: "Getting water? Step away pauses everything without alarms. Come back in time and the timer carries on where it stopped.", keys: [["B", "Step away, or I'm back"]] },
-  { el: "#open-settings", title: "Shortcuts that work anywhere", text: "Blocked sites, penalties, sounds and the timer bar's opacity live in settings. Replay this tour from the question mark.", keys: [["C", "CAT calculator"], ["L", "Timer bar click-through"]] },
+  { el: "#open-settings", title: "Shortcuts that work anywhere", text: "Blocked sites, penalties, sounds and the timer bar's opacity live in settings. Replay this tour from the question mark.", keys: [["C", "Calculator"], ["L", "Timer bar click-through"]] },
 ];
 
 const tour = {

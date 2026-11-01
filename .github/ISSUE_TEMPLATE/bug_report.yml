@@ -1,0 +1,45 @@
+name: Bug report
+description: Something in LockIn doesn't work as described.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what you saw instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Start a focus block
+        2. ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: LockIn version
+      placeholder: v0.1.0 or commit hash
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      placeholder: Windows 11 24H2
+    validations:
+      required: true
+  - type: input
+    id: camera
+    attributes:
+      label: Camera and display scaling
+      placeholder: Built-in 720p webcam, 150 %
+  - type: textarea
+    id: logs
+    attributes:
+      label: Console output
+      description: Output from running `lockin.exe` in a terminal, if any. Don't attach camera images.
+      render: text

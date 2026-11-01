@@ -2,6 +2,12 @@
 //! shifting the client area down 1 px in WM_NCCALCSIZE, which leaves a visible line above our
 //! transparent overlays. We turn off DWM's frame and subclass those windows so the client area
 //! is the whole window again.
+//!
+//! With DWM non-client rendering off, `DefWindowProc` falls back to painting the classic caption
+//! (title, minimise/maximise/close) straight over the client area whenever the window activates,
+//! is dragged, or has its title or icon set. winit keeps WS_CAPTION on undecorated windows, so the
+//! subclass strips the caption styles (and keeps them off when winit re-applies its styles) and
+//! swallows the remaining non-client paints.
 
 use std::mem::size_of_val;
 use windows::core::{w, BOOL};
@@ -12,20 +18,52 @@ use windows::Win32::Graphics::Dwm::{
 };
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallWindowProcW, EnumThreadWindows, GetPropW, GetWindowTextW, SetPropW, SetWindowLongPtrW, SetWindowPos, GWLP_WNDPROC,
-    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WM_NCCALCSIZE, WNDPROC,
+    CallWindowProcW, EnumThreadWindows, GetPropW, GetWindowLongPtrW, GetWindowTextW, SetPropW, SetWindowLongPtrW,
+    SetWindowPos, GWLP_WNDPROC, GWL_STYLE, STYLESTRUCT, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SWP_NOZORDER, WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCPAINT, WM_SETICON, WM_SETTEXT, WM_STYLECHANGING, WNDPROC,
+    WS_CAPTION, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_SYSMENU, WS_VISIBLE,
 };
 
 const OLD_PROC: windows::core::PCWSTR = w!("LockIn.OverlayOldProc");
 
-/// Subclass proc: client area = window area (no winit 1 px shadow strip), everything else to winit.
+/// Undocumented uxtheme messages that draw the caption and frame directly.
+const WM_NCUAHDRAWCAPTION: u32 = 0xAE;
+const WM_NCUAHDRAWFRAME: u32 = 0xAF;
+/// Styles that make `DefWindowProc` draw a title bar. Dragging still works without them: egui
+/// starts a move with WM_NCLBUTTONDOWN/HTCAPTION, which needs no caption.
+const CAPTION_STYLES: u32 = WS_CAPTION.0 | WS_SYSMENU.0 | WS_MINIMIZEBOX.0 | WS_MAXIMIZEBOX.0;
+
+/// Subclass proc: client area = window area (no winit 1 px shadow strip), no classic caption
+/// painting, everything else to winit.
 unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     unsafe {
-        if msg == WM_NCCALCSIZE && wp.0 != 0 {
-            return LRESULT(0);
-        }
         let old: WNDPROC = std::mem::transmute(GetPropW(hwnd, OLD_PROC).0);
-        CallWindowProcW(old, hwnd, msg, wp, lp)
+        match msg {
+            WM_NCCALCSIZE if wp.0 != 0 => LRESULT(0),
+            WM_NCPAINT | WM_NCUAHDRAWCAPTION | WM_NCUAHDRAWFRAME => LRESULT(0),
+            WM_STYLECHANGING if wp.0 as i32 == GWL_STYLE.0 => {
+                let s = lp.0 as *mut STYLESTRUCT;
+                (*s).styleNew &= !CAPTION_STYLES;
+                CallWindowProcW(old, hwnd, msg, wp, lp)
+            }
+            // lParam -1: DefWindowProc updates the active state but skips the caption repaint.
+            WM_NCACTIVATE => CallWindowProcW(old, hwnd, msg, wp, LPARAM(-1)),
+            // DefWindowProc repaints the caption after storing the text or icon unless the
+            // window is hidden for the duration of the call.
+            WM_SETTEXT | WM_SETICON => {
+                let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+                let visible = style & WS_VISIBLE.0 as isize != 0;
+                if visible {
+                    SetWindowLongPtrW(hwnd, GWL_STYLE, style & !(WS_VISIBLE.0 as isize));
+                }
+                let r = CallWindowProcW(old, hwnd, msg, wp, lp);
+                if visible {
+                    SetWindowLongPtrW(hwnd, GWL_STYLE, GetWindowLongPtrW(hwnd, GWL_STYLE) | WS_VISIBLE.0 as isize);
+                }
+                r
+            }
+            _ => CallWindowProcW(old, hwnd, msg, wp, lp),
+        }
     }
 }
 
@@ -61,10 +99,12 @@ unsafe extern "system" fn remove_frame(hwnd: HWND, _: LPARAM) -> BOOL {
         }
         // Store winit's proc before swapping so overlay_proc can always forward.
         let proc_ptr: unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT = overlay_proc;
-        let old = windows::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(hwnd, GWLP_WNDPROC);
+        let old = GetWindowLongPtrW(hwnd, GWLP_WNDPROC);
         if old != proc_ptr as isize {
             let _ = SetPropW(hwnd, OLD_PROC, Some(HANDLE(old as *mut _)));
             SetWindowLongPtrW(hwnd, GWLP_WNDPROC, proc_ptr as isize);
+            let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+            SetWindowLongPtrW(hwnd, GWL_STYLE, style & !(CAPTION_STYLES as isize));
             let _ = SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
         }
     }

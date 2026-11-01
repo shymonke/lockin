@@ -164,13 +164,15 @@ pub fn classify_gaze_features(sample: &FeatureSample, cal: &Calibration) -> Opti
     const VAR_FLOOR: f32 = 0.16;
     const OUTLIER_D2: f32 = 16.0;
     // Avoid giving effectively infinite weight to a feature that did not happen to move during calibration.
-    const SCALE_FLOOR: [f32; GAZE_FEATURES] = [5.0, 5.0, 5.0, 0.05, 0.05, 0.05, 0.05, 0.04, 0.04, 0.01, 0.03, 0.03];
+    const SCALE_FLOOR: [f32; GAZE_FEATURES] =
+        [5.0, 5.0, 5.0, 0.05, 0.05, 0.05, 0.05, 0.04, 0.04, 0.01, 0.03, 0.03, 0.05, 0.05];
     let classes: [(&[FeatureSample], Gaze); 3] = [
         (&cal.screen_samples, Gaze::Screen),
         (&cal.book_samples, Gaze::Book),
         (&cal.away_samples, Gaze::Away),
     ];
-    if classes.iter().any(|(s, _)| s.len() < MIN_SAMPLES) {
+    let stale = |s: &[FeatureSample]| s.len() < MIN_SAMPLES || s.iter().any(|x| x.values.len() != GAZE_FEATURES);
+    if sample.values.len() != GAZE_FEATURES || classes.iter().any(|(s, _)| stale(s)) {
         return None;
     }
 
@@ -178,7 +180,7 @@ pub fn classify_gaze_features(sample: &FeatureSample, cal: &Calibration) -> Opti
     let mut mean = [0.0f32; GAZE_FEATURES];
     for (samples, _) in &classes {
         for s in *samples {
-            for (m, x) in mean.iter_mut().zip(s.values) {
+            for (m, x) in mean.iter_mut().zip(&s.values) {
                 *m += x / total;
             }
         }
@@ -611,15 +613,15 @@ mod tests {
         (0..8)
             .map(|n| {
                 let offset = (n as f32 - 3.5) * 0.002;
-                FeatureSample { values: std::array::from_fn(|i| base[i] + offset * (1.0 + i as f32 * 0.05)) }
+                FeatureSample { values: (0..GAZE_FEATURES).map(|i| base[i] + offset * (1.0 + i as f32 * 0.05)).collect() }
             })
             .collect()
     }
 
     fn trained_calibration() -> Calibration {
-        let screen = [0.0, 0.0, 0.0, 0.50, 0.35, 0.50, 0.35, 0.28, 0.28, 0.08, 0.50, 0.48];
-        let book = [1.0, 14.0, 0.5, 0.51, 0.73, 0.49, 0.72, 0.24, 0.24, 0.07, 0.50, 0.56];
-        let away = [25.0, -4.0, 5.0, 0.78, 0.52, 0.76, 0.51, 0.25, 0.25, 0.06, 0.62, 0.48];
+        let screen = [0.0, 0.0, 0.0, 0.50, 0.35, 0.50, 0.35, 0.28, 0.28, 0.08, 0.50, 0.48, 0.0, 0.05];
+        let book = [1.0, 14.0, 0.5, 0.51, 0.73, 0.49, 0.72, 0.24, 0.24, 0.07, 0.50, 0.56, 0.0, -0.45];
+        let away = [25.0, -4.0, 5.0, 0.78, 0.52, 0.76, 0.51, 0.25, 0.25, 0.06, 0.62, 0.48, 0.5, 0.0];
         Calibration {
             screen_samples: cluster(screen),
             book_samples: cluster(book),
@@ -645,7 +647,7 @@ mod tests {
     #[test]
     fn feature_classifier_falls_back_to_away_for_outliers() {
         let cal = trained_calibration();
-        let sample = FeatureSample { values: [200.0; GAZE_FEATURES] };
+        let sample = FeatureSample { values: vec![200.0; GAZE_FEATURES] };
         let (gaze, confidence) = classify_gaze_features(&sample, &cal).unwrap();
         assert_eq!(gaze, Gaze::Away);
         assert!(confidence >= 0.5);
@@ -667,5 +669,12 @@ mod tests {
         let cal: Calibration = serde_json::from_str(old).unwrap();
         assert_eq!(cal.screen.unwrap().roll, 0.0);
         assert!(cal.screen_samples.is_empty() && cal.book_samples.is_empty() && cal.away_samples.is_empty());
+    }
+
+    #[test]
+    fn samples_from_an_older_feature_set_are_ignored() {
+        let mut cal = trained_calibration();
+        cal.screen_samples.iter_mut().for_each(|s| s.values.truncate(12));
+        assert_eq!(classify_gaze_features(&cal.book_samples[0], &cal), None);
     }
 }

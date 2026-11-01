@@ -1,5 +1,6 @@
-//! Camera L1 (YuNet face + MediaPipe Iris), L2 (NanoDet person/phone), guided calibration and
-//! the dashboard preview feed. Models and camera frames stay in memory.
+//! Camera L1 (YuNet face box + MediaPipe Face Landmarker mesh and blendshapes), L2 (RTMDet-tiny
+//! person/phone), guided calibration and the dashboard preview feed. Models and camera frames stay
+//! in memory.
 
 use crate::camera::{self, Camera, Frame};
 use crate::config::{Calibration, FeatureSample, Pose};
@@ -13,19 +14,21 @@ use std::time::{Duration, Instant};
 use tract_onnx::prelude::*;
 
 static YUNET: &[u8] = include_bytes!("../models/yunet.onnx");
-static IRIS: &[u8] = include_bytes!("../models/iris.onnx");
-static NANODET: &[u8] = include_bytes!("../models/nanodet.onnx");
+static MESH_MODEL: &[u8] = include_bytes!("../models/face_landmarks.onnx");
+static BLENDSHAPES: &[u8] = include_bytes!("../models/face_blendshapes.onnx");
+static RTMDET: &[u8] = include_bytes!("../models/rtmdet.onnx");
 
 const FACE_W: usize = 256;
 const FACE_H: usize = 192;
-const EYE: usize = 64;
+const MESH: usize = 256;
+const MESH_POINTS: usize = 478;
 const DET: usize = 416;
 const COCO_PERSON: usize = 0;
 const COCO_PHONE: usize = 67;
 
 type Plan = Arc<TypedRunnableModel>;
 
-fn load(bytes: &[u8], shape: [usize; 4]) -> TractResult<Plan> {
+fn load(bytes: &[u8], shape: &[usize]) -> TractResult<Plan> {
     tract_onnx::onnx()
         .model_for_read(&mut &bytes[..])?
         .with_input_fact(0, f32::fact(shape).into())?
@@ -77,24 +80,13 @@ impl Face {
             ],
         }
     }
-
-    /// Approximate Euler angles in degrees. Roll compensation makes yaw/pitch substantially more
-    /// stable than the former raw five-point ratios; per-user eye features carry the fine gaze signal.
-    pub fn head(&self) -> [f32; 3] {
-        let p = self.pose();
-        [
-            (p.yaw * 70.0).clamp(-65.0, 65.0),
-            ((p.pitch - 0.62) * 75.0).clamp(-50.0, 60.0),
-            p.roll.clamp(-60.0, 60.0),
-        ]
-    }
 }
 
 pub struct FaceModel(Plan);
 
 impl FaceModel {
     pub fn load() -> TractResult<Self> {
-        Ok(Self(load(YUNET, [1, 3, FACE_H, FACE_W])?))
+        Ok(Self(load(YUNET, &[1, 3, FACE_H, FACE_W])?))
     }
 
     pub fn detect(&self, f: &Frame) -> TractResult<Option<Face>> {
@@ -194,14 +186,27 @@ struct EyeMeasure {
     iris_y: f32,
 }
 
+/// Face Landmarker output for one face.
 #[derive(Clone)]
-pub(crate) struct EyeSet {
+pub(crate) struct Mesh {
+    /// All 478 points in normalised frame coordinates (for the overlay).
+    points: Vec<[f32; 2]>,
+    /// Image-left eye first (the subject's right eye), then image-right.
     eyes: [EyeMeasure; 2],
+    /// Yaw, pitch (positive = looking down), roll in degrees.
+    head: [f32; 3],
+    /// Eye-look blendshapes averaged over both eyes: horizontal (out minus in, signed so both eyes
+    /// agree) and vertical (up minus down).
+    look: [f32; 2],
 }
 
-impl EyeSet {
+impl Mesh {
     pub(crate) fn overlays(&self) -> Vec<EyeOverlay> {
         self.eyes.iter().map(|e| e.overlay.clone()).collect()
+    }
+
+    pub(crate) fn head(&self) -> [f32; 3] {
+        self.head
     }
 
     pub(crate) fn direction(&self) -> [f32; 2] {
@@ -214,163 +219,235 @@ impl EyeSet {
     }
 }
 
-pub struct EyeModel(Plan);
+/// Mesh indices for one eye: 16-point lid contour (outer corner, lower lid, inner corner, upper
+/// lid), iris centre (the next four indices are the iris rim), upper and lower lid midpoints.
+struct EyeIdx {
+    contour: [usize; 16],
+    iris: usize,
+    upper: usize,
+    lower: usize,
+}
 
-impl EyeModel {
+const EYES: [EyeIdx; 2] = [
+    EyeIdx {
+        contour: [33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246],
+        iris: 468,
+        upper: 159,
+        lower: 145,
+    },
+    EyeIdx {
+        contour: [263, 249, 390, 373, 374, 380, 381, 382, 362, 398, 384, 385, 386, 387, 388, 466],
+        iris: 473,
+        upper: 386,
+        lower: 374,
+    },
+];
+
+/// Landmarks the blendshape model takes, in this order (MediaPipe `face_blendshapes_graph.cc`).
+const BLENDSHAPE_INPUT: [usize; 146] = [
+    0, 1, 4, 5, 6, 7, 8, 10, 13, 14, 17, 21, 33, 37, 39, 40, 46, 52, 53, 54, 55, 58, 61, 63, 65, 66, 67, 70, 78, 80,
+    81, 82, 84, 87, 88, 91, 93, 95, 103, 105, 107, 109, 127, 132, 133, 136, 144, 145, 146, 148, 149, 150, 152, 153,
+    154, 155, 157, 158, 159, 160, 161, 162, 163, 168, 172, 173, 176, 178, 181, 185, 191, 195, 197, 234, 246, 249, 251,
+    263, 267, 269, 270, 276, 282, 283, 284, 285, 288, 291, 293, 295, 296, 297, 300, 308, 310, 311, 312, 314, 317, 318,
+    321, 323, 324, 332, 334, 336, 338, 356, 361, 362, 365, 373, 374, 375, 377, 378, 379, 380, 381, 382, 384, 385, 386,
+    387, 388, 389, 390, 397, 398, 400, 402, 405, 409, 415, 454, 466, 468, 469, 470, 471, 472, 473, 474, 475, 476, 477,
+];
+/// Blendshape output indices: eyeLook{Down,In,Out,Up}{Left,Right}.
+const LOOK_DOWN: [usize; 2] = [11, 12];
+const LOOK_IN: [usize; 2] = [13, 14];
+const LOOK_OUT: [usize; 2] = [15, 16];
+const LOOK_UP: [usize; 2] = [17, 18];
+
+fn sample_bilinear(f: &Frame, x: f32, y: f32) -> [f32; 3] {
+    let x = x.clamp(0.0, (f.width - 1) as f32);
+    let y = y.clamp(0.0, (f.height - 1) as f32);
+    let (x0, y0) = (x.floor() as usize, y.floor() as usize);
+    let (x1, y1) = ((x0 + 1).min(f.width - 1), (y0 + 1).min(f.height - 1));
+    let (fx, fy) = (x - x0 as f32, y - y0 as f32);
+    let pixel = |px: usize, py: usize| &f.bgra[(py * f.width + px) * 4..][..3];
+    let (p00, p10, p01, p11) = (pixel(x0, y0), pixel(x1, y0), pixel(x0, y1), pixel(x1, y1));
+    let channel = |bgr: usize| {
+        let top = p00[bgr] as f32 * (1.0 - fx) + p10[bgr] as f32 * fx;
+        let bottom = p01[bgr] as f32 * (1.0 - fx) + p11[bgr] as f32 * fx;
+        (top * (1.0 - fy) + bottom * fy) / 255.0
+    };
+    [channel(2), channel(1), channel(0)]
+}
+
+fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn unit(v: [f32; 3]) -> [f32; 3] {
+    let n = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt().max(1e-6);
+    [v[0] / n, v[1] / n, v[2] / n]
+}
+
+/// Head angles from the mesh: the eye-corner line is the head's x axis, forehead-to-chin its y
+/// axis. `p` is in crop pixels, where z shares x's scale; `crop_roll` is the crop's rotation.
+fn head_angles(p: impl Fn(usize) -> [f32; 3], crop_roll: f32) -> [f32; 3] {
+    let x = unit(sub(p(263), p(33)));
+    let down = sub(p(152), p(10));
+    let d = down[0] * x[0] + down[1] * x[1] + down[2] * x[2];
+    let y = unit([down[0] - d * x[0], down[1] - d * x[1], down[2] - d * x[2]]);
+    [
+        x[2].atan2(x[0]).to_degrees(),
+        y[2].atan2(y[1]).to_degrees(),
+        (crop_roll + x[1].atan2(x[0])).to_degrees(),
+    ]
+}
+
+fn eye_measure(
+    idx: &EyeIdx,
+    p: &impl Fn(usize) -> [f32; 3],
+    to_frame: &impl Fn(f32, f32) -> [f32; 2],
+    crop_px_to_frame_w: f32,
+) -> Option<EyeMeasure> {
+    let mut min = [f32::INFINITY; 2];
+    let mut max = [f32::NEG_INFINITY; 2];
+    for &i in &idx.contour {
+        let q = p(i);
+        for d in 0..2 {
+            min[d] = min[d].min(q[d]);
+            max[d] = max[d].max(q[d]);
+        }
+    }
+    let width = (max[0] - min[0]).max(1e-3);
+    let iris = p(idx.iris);
+    let (upper, lower) = (p(idx.upper)[1], p(idx.lower)[1]);
+    let iris_x = ((iris[0] - min[0]) / width).clamp(-0.25, 1.25);
+    // Normalising by the instantaneous lid gap makes blinks look like huge gaze shifts.
+    // Measure vertical iris displacement from the lid centre in eye-width units instead;
+    // the factor maps the normal visible eye range approximately onto 0..1.
+    let iris_y = (0.5 + (iris[1] - (upper + lower) * 0.5) / width * 3.0).clamp(-0.25, 1.25);
+    let open = ((lower - upper).abs() / width).clamp(0.0, 2.0);
+    if !iris_x.is_finite() || !iris_y.is_finite() || !open.is_finite() {
+        return None;
+    }
+    let rim: f32 = (1..5)
+        .map(|k| {
+            let r = p(idx.iris + k);
+            (r[0] - iris[0]).hypot(r[1] - iris[1])
+        })
+        .sum();
+    Some(EyeMeasure {
+        overlay: EyeOverlay {
+            contour: idx.contour.iter().map(|&i| to_frame(p(i)[0], p(i)[1])).collect(),
+            iris: to_frame(iris[0], iris[1]),
+            iris_r: rim / 4.0 * crop_px_to_frame_w,
+            open,
+        },
+        iris_x,
+        iris_y,
+    })
+}
+
+/// MediaPipe Face Landmarker: 478-point mesh (with irises) on a face crop, then 52 blendshapes
+/// from a subset of those points.
+pub struct MeshModel {
+    mesh: Plan,
+    blendshapes: Plan,
+}
+
+impl MeshModel {
     pub fn load() -> TractResult<Self> {
-        Ok(Self(load(IRIS, [1, 3, EYE, EYE])?))
-    }
-
-    fn sample_bilinear(f: &Frame, x: f32, y: f32) -> [f32; 3] {
-        let x = x.clamp(0.0, (f.width - 1) as f32);
-        let y = y.clamp(0.0, (f.height - 1) as f32);
-        let (x0, y0) = (x.floor() as usize, y.floor() as usize);
-        let (x1, y1) = ((x0 + 1).min(f.width - 1), (y0 + 1).min(f.height - 1));
-        let (fx, fy) = (x - x0 as f32, y - y0 as f32);
-        let pixel = |px: usize, py: usize| &f.bgra[(py * f.width + px) * 4..][..3];
-        let (p00, p10, p01, p11) = (pixel(x0, y0), pixel(x1, y0), pixel(x0, y1), pixel(x1, y1));
-        let channel = |bgr: usize| {
-            let top = p00[bgr] as f32 * (1.0 - fx) + p10[bgr] as f32 * fx;
-            let bottom = p01[bgr] as f32 * (1.0 - fx) + p11[bgr] as f32 * fx;
-            (top * (1.0 - fy) + bottom * fy) / 255.0
-        };
-        [channel(2), channel(1), channel(0)]
-    }
-
-    fn one(
-        &self,
-        f: &Frame,
-        center: [f32; 2],
-        side: f32,
-        roll: f32,
-        flip: bool,
-    ) -> TractResult<EyeMeasure> {
-        let plane = EYE * EYE;
-        let mut data = vec![0.0f32; plane * 3];
-        let (sn, cs) = roll.sin_cos();
-        for y in 0..EYE {
-            for x in 0..EYE {
-                let sx = if flip { EYE - 1 - x } else { x };
-                let lx = (sx as f32 + 0.5 - EYE as f32 * 0.5) * side / EYE as f32;
-                let ly = (y as f32 + 0.5 - EYE as f32 * 0.5) * side / EYE as f32;
-                let rgb = Self::sample_bilinear(
-                    f,
-                    center[0] + lx * cs - ly * sn,
-                    center[1] + lx * sn + ly * cs,
-                );
-                let i = y * EYE + x;
-                for c in 0..3 {
-                    data[c * plane + i] = rgb[c];
-                }
-            }
-        }
-        let input = Tensor::from_shape(&[1, 3, EYE, EYE], &data)?;
-        let out = self.0.run(tvec!(input.into()))?;
-        let eye = floats(&out[0])?;
-        let iris = floats(&out[1])?;
-        if eye.len() < 71 * 3 || iris.len() < 5 * 3 {
-            return Err(std::io::Error::other("unexpected iris model outputs").into());
-        }
-        let unflip_x = |x: f32| if flip { EYE as f32 - x } else { x };
-        let project = |x: f32, y: f32| {
-            let lx = (unflip_x(x) / EYE as f32 - 0.5) * side;
-            let ly = (y / EYE as f32 - 0.5) * side;
-            [
-                (center[0] + lx * cs - ly * sn) / f.width as f32,
-                (center[1] + lx * sn + ly * cs) / f.height as f32,
-            ]
-        };
-        const CONTOUR: [usize; 16] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 15, 14, 13, 12, 11, 10, 9];
-        let contour = CONTOUR
-            .iter()
-            .map(|&i| project(eye[i * 3], eye[i * 3 + 1]))
-            .collect::<Vec<_>>();
-        let iris_xy = [unflip_x(iris[0]), iris[1]];
-        let iris_pos = project(iris[0], iris[1]);
-        let mut iris_radius_px = 0.0;
-        for i in 1..5 {
-            iris_radius_px += ((unflip_x(iris[i * 3]) - iris_xy[0]).powi(2)
-                + (iris[i * 3 + 1] - iris_xy[1]).powi(2))
-            .sqrt();
-        }
-        iris_radius_px = iris_radius_px / 4.0 * side / EYE as f32;
-        let mut min = [f32::INFINITY; 2];
-        let mut max = [f32::NEG_INFINITY; 2];
-        for i in 0..16 {
-            let p = [unflip_x(eye[i * 3]), eye[i * 3 + 1]];
-            for d in 0..2 {
-                min[d] = min[d].min(p[d]);
-                max[d] = max[d].max(p[d]);
-            }
-        }
-        let width = (max[0] - min[0]).max(1e-3);
-        let lower_mid_y = eye[4 * 3 + 1];
-        let upper_mid_y = eye[12 * 3 + 1];
-        let lid_mid_y = (lower_mid_y + upper_mid_y) * 0.5;
-        let height = (lower_mid_y - upper_mid_y).abs();
-        let iris_x = ((iris_xy[0] - min[0]) / width).clamp(-0.25, 1.25);
-        // Normalising by the instantaneous lid gap makes blinks look like huge gaze shifts.
-        // Measure vertical iris displacement from the lid centre in eye-width units instead;
-        // the factor maps the normal visible eye range approximately onto 0..1.
-        let iris_y = (0.5 + (iris_xy[1] - lid_mid_y) / width * 3.0).clamp(-0.25, 1.25);
-        let open = (height / width).clamp(0.0, 2.0);
-        if !iris_x.is_finite() || !iris_y.is_finite() || !open.is_finite() {
-            return Err(std::io::Error::other("non-finite iris output").into());
-        }
-        Ok(EyeMeasure {
-            overlay: EyeOverlay {
-                contour,
-                iris: iris_pos,
-                iris_r: iris_radius_px / f.width as f32,
-                open,
-            },
-            iris_x,
-            iris_y,
+        Ok(Self {
+            mesh: load(MESH_MODEL, &[1, MESH, MESH, 3])?,
+            blendshapes: load(BLENDSHAPES, &[1, BLENDSHAPE_INPUT.len(), 2])?,
         })
     }
 
-    pub(crate) fn detect(&self, f: &Frame, face: &Face) -> TractResult<Option<EyeSet>> {
-        let re = [
-            face.landmarks[0][0] * f.width as f32,
-            face.landmarks[0][1] * f.height as f32,
-        ];
-        let le = [
-            face.landmarks[1][0] * f.width as f32,
-            face.landmarks[1][1] * f.height as f32,
-        ];
-        let dx = le[0] - re[0];
-        let dy = le[1] - re[1];
-        let dist = dx.hypot(dy);
-        if dist < 10.0 || !dist.is_finite() {
+    pub(crate) fn detect(&self, f: &Frame, face: &Face) -> TractResult<Option<Mesh>> {
+        let (fw, fh) = (f.width as f32, f.height as f32);
+        let (re, le) = (face.landmarks[0], face.landmarks[1]);
+        let roll = ((le[1] - re[1]) * fh).atan2((le[0] - re[0]) * fw);
+        let center = [(face.rect[0] + face.rect[2] * 0.5) * fw, (face.rect[1] + face.rect[3] * 0.5) * fh];
+        // MediaPipe's crop: the detection box squared on its long side, enlarged 1.5x, rotated level.
+        let side = (face.rect[2] * fw).max(face.rect[3] * fh) * 1.5;
+        if !(side >= 16.0) || !roll.is_finite() {
             return Ok(None);
         }
-        let roll = dy.atan2(dx);
-        let side = dist * 1.04;
-        let right = self.one(f, re, side, roll, true)?;
-        let left = self.one(f, le, side, roll, false)?;
-        Ok(Some(EyeSet {
+        let (sn, cs) = roll.sin_cos();
+        let to_px = |x: f32, y: f32| {
+            let (lx, ly) = ((x / MESH as f32 - 0.5) * side, (y / MESH as f32 - 0.5) * side);
+            [center[0] + lx * cs - ly * sn, center[1] + lx * sn + ly * cs]
+        };
+        // NHWC, RGB in 0..1.
+        let mut data = vec![0f32; MESH * MESH * 3];
+        for y in 0..MESH {
+            for x in 0..MESH {
+                let [sx, sy] = to_px(x as f32 + 0.5, y as f32 + 0.5);
+                data[(y * MESH + x) * 3..][..3].copy_from_slice(&sample_bilinear(f, sx, sy));
+            }
+        }
+        let out = self.mesh.run(tvec!(Tensor::from_shape(&[1, MESH, MESH, 3], &data)?.into()))?;
+        let pts = floats(&out[0])?;
+        let presence = floats(&out[1])?.first().copied().unwrap_or(f32::NEG_INFINITY);
+        if pts.len() < MESH_POINTS * 3 {
+            return Err(std::io::Error::other("unexpected face mesh output").into());
+        }
+        // Presence is a logit; below 0 the crop holds no face.
+        if !(presence > 0.0) {
+            return Ok(None);
+        }
+        let p = |i: usize| [pts[i * 3], pts[i * 3 + 1], pts[i * 3 + 2]];
+        let to_frame = |x: f32, y: f32| {
+            let [px, py] = to_px(x, y);
+            [px / fw, py / fh]
+        };
+        let crop_px_to_frame_w = side / MESH as f32 / fw;
+        let (Some(right), Some(left)) = (
+            eye_measure(&EYES[0], &p, &to_frame, crop_px_to_frame_w),
+            eye_measure(&EYES[1], &p, &to_frame, crop_px_to_frame_w),
+        ) else {
+            return Ok(None);
+        };
+
+        // The blendshape model takes the subset in frame pixels.
+        let mut input = Vec::with_capacity(BLENDSHAPE_INPUT.len() * 2);
+        for &i in &BLENDSHAPE_INPUT {
+            input.extend(to_px(pts[i * 3], pts[i * 3 + 1]));
+        }
+        let out = self
+            .blendshapes
+            .run(tvec!(Tensor::from_shape(&[1, BLENDSHAPE_INPUT.len(), 2], &input)?.into()))?;
+        let b = floats(&out[0])?;
+        if b.len() < 52 {
+            return Err(std::io::Error::other("unexpected blendshape output").into());
+        }
+        let look = [
+            ((b[LOOK_OUT[0]] - b[LOOK_IN[0]]) - (b[LOOK_OUT[1]] - b[LOOK_IN[1]])) * 0.5,
+            ((b[LOOK_UP[0]] + b[LOOK_UP[1]]) - (b[LOOK_DOWN[0]] + b[LOOK_DOWN[1]])) * 0.5,
+        ];
+        Ok(Some(Mesh {
+            points: (0..MESH_POINTS).map(|i| to_frame(pts[i * 3], pts[i * 3 + 1])).collect(),
             eyes: [right, left],
+            head: head_angles(p, roll),
+            look,
         }))
     }
 }
 
-pub(crate) fn feature_sample(face: &Face, eyes: &EyeSet) -> FeatureSample {
-    let h = face.head();
+pub(crate) fn feature_sample(face: &Face, mesh: &Mesh) -> FeatureSample {
+    let h = mesh.head;
     let p = face.pose();
+    let [r, l] = &mesh.eyes;
     FeatureSample {
-        values: [
+        values: vec![
             h[0],
             h[1],
             h[2],
-            eyes.eyes[0].iris_x,
-            eyes.eyes[0].iris_y,
-            eyes.eyes[1].iris_x,
-            eyes.eyes[1].iris_y,
-            eyes.eyes[0].overlay.open,
-            eyes.eyes[1].overlay.open,
+            r.iris_x,
+            r.iris_y,
+            l.iris_x,
+            l.iris_y,
+            r.overlay.open,
+            l.overlay.open,
             p.area,
             p.center[0],
             p.center[1],
+            mesh.look[0],
+            mesh.look[1],
         ],
     }
 }
@@ -381,16 +458,20 @@ pub struct Objects {
     pub phone: f32,
 }
 
+/// RTMDet-tiny (COCO), cut before NMS: per-anchor sigmoid scores for the 80 classes. Only the
+/// best person and phone scores are used, so boxes are not decoded.
 pub struct ObjectModel(Plan);
 
 impl ObjectModel {
     pub fn load() -> TractResult<Self> {
-        Ok(Self(load(NANODET, [1, 3, DET, DET])?))
+        Ok(Self(load(RTMDET, &[1, 3, DET, DET])?))
     }
 
     pub fn detect(&self, f: &Frame) -> TractResult<Objects> {
+        // MMDetection preprocessing: BGR, letterboxed top-left onto grey 114, mean/std normalised.
         const MEAN: [f32; 3] = [103.53, 116.28, 123.675];
         const STD: [f32; 3] = [57.375, 57.12, 58.395];
+        const PAD: f32 = 114.0;
         let scale = (DET as f32 / f.width as f32).min(DET as f32 / f.height as f32);
         let (nw, nh) = (
             (f.width as f32 * scale) as usize,
@@ -399,7 +480,7 @@ impl ObjectModel {
         let plane = DET * DET;
         let mut data = vec![0f32; 3 * plane];
         for c in 0..3 {
-            data[c * plane..(c + 1) * plane].fill((0.0 - MEAN[c]) / STD[c]);
+            data[c * plane..(c + 1) * plane].fill((PAD - MEAN[c]) / STD[c]);
         }
         for y in 0..nh {
             let sy = (y * f.height / nh).min(f.height - 1);
@@ -415,11 +496,9 @@ impl ObjectModel {
         let input = Tensor::from_shape(&[1, 3, DET, DET], &data)?;
         let out = self.0.run(tvec!(input.into()))?;
         let mut o = Objects::default();
-        for t in out.iter().take(3) {
-            for row in floats(t)?.chunks_exact(80) {
-                o.person = o.person.max(row[COCO_PERSON]);
-                o.phone = o.phone.max(row[COCO_PHONE]);
-            }
+        for row in floats(&out[0])?.chunks_exact(80) {
+            o.person = o.person.max(row[COCO_PERSON]);
+            o.phone = o.phone.max(row[COCO_PHONE]);
         }
         Ok(o)
     }
@@ -468,14 +547,16 @@ pub enum Msg {
 }
 
 const PERSON_MIN: f32 = 0.4;
-const PHONE_MIN: f32 = 0.5;
+/// RTMDet's quality-focal scores run lower than NanoDet's: hand-held phones scored 0.50-0.56 in
+/// test photos, a phone-free portrait 0.12. The policy still needs two hits in a row.
+const PHONE_MIN: f32 = 0.4;
 const FAST_SECS: f64 = 0.7;
 const PREVIEW_SECS: f64 = 1.0 / 12.0;
 const L2_IDLE_DROP: Duration = Duration::from_secs(60);
 
 struct Analysis {
     face: Option<Face>,
-    eyes: Option<EyeSet>,
+    mesh: Option<Mesh>,
     gaze: Option<(Gaze, f32)>,
     feature: Option<FeatureSample>,
     obs: CamObs,
@@ -490,7 +571,7 @@ struct Worker {
     seq: u64,
     cam: Option<(u32, Camera)>,
     face: Option<FaceModel>,
-    eye: Option<EyeModel>,
+    mesh: Option<MeshModel>,
     obj: Option<(ObjectModel, Instant)>,
     last_objects: Option<Objects>,
     calibration: Calibration,
@@ -513,8 +594,8 @@ impl Worker {
         if self.face.is_none() {
             self.face = Some(FaceModel::load().map_err(|e| format!("Face model failed: {e}"))?);
         }
-        if self.eye.is_none() {
-            self.eye = Some(EyeModel::load().map_err(|e| format!("Eye model failed: {e}"))?);
+        if self.mesh.is_none() {
+            self.mesh = Some(MeshModel::load().map_err(|e| format!("Face mesh model failed: {e}"))?);
         }
         Ok(())
     }
@@ -530,9 +611,9 @@ impl Worker {
             .unwrap()
             .detect(&self.frame)
             .map_err(|e| e.to_string())?;
-        let eyes = match face {
-            Some(ref f) => self
-                .eye
+        let mesh = match &face {
+            Some(f) => self
+                .mesh
                 .as_ref()
                 .unwrap()
                 .detect(&self.frame, f)
@@ -542,8 +623,8 @@ impl Worker {
         let l1_ms = t.elapsed().as_secs_f32() * 1000.0;
         let feature = face
             .as_ref()
-            .zip(eyes.as_ref())
-            .map(|(f, e)| feature_sample(f, e));
+            .zip(mesh.as_ref())
+            .map(|(f, m)| feature_sample(f, m));
         let gaze = match (face, feature.as_ref()) {
             (Some(f), Some(s)) => classify_gaze_features(s, &self.calibration)
                 .or_else(|| Some((classify_gaze(f.pose(), &self.calibration), 0.45))),
@@ -574,7 +655,7 @@ impl Worker {
         }
         Ok(Analysis {
             face,
-            eyes,
+            mesh,
             gaze,
             feature,
             obs,
@@ -587,7 +668,7 @@ impl Worker {
         self.send(Msg::Obs {
             obs: a.obs,
             face: a.face,
-            eyes: a.eyes.as_ref().map(EyeSet::overlays),
+            eyes: a.mesh.as_ref().map(Mesh::overlays),
             gaze: a.gaze,
             l1_ms: a.l1_ms,
             l2: a.l2,
@@ -608,10 +689,14 @@ impl Worker {
         let last = self.last_objects;
         let overlay = Overlay {
             face: a.face.map(|f| f.rect),
-            landmarks: a.face.map(|f| f.landmarks.to_vec()).unwrap_or_default(),
-            eyes: a.eyes.as_ref().map(EyeSet::overlays).unwrap_or_default(),
-            head: a.face.map(|f| f.head()),
-            gaze: a.eyes.as_ref().map(EyeSet::direction),
+            landmarks: match (&a.mesh, a.face) {
+                (Some(m), _) => m.points.clone(),
+                (None, Some(f)) => f.landmarks.to_vec(),
+                (None, None) => Vec::new(),
+            },
+            eyes: a.mesh.as_ref().map(Mesh::overlays).unwrap_or_default(),
+            head: a.mesh.as_ref().map(Mesh::head),
+            gaze: a.mesh.as_ref().map(Mesh::direction),
             label,
             confidence: a.gaze.map_or(0.0, |g| g.1),
             person: last.map(|o| o.person),
@@ -684,7 +769,7 @@ impl Worker {
     fn release_l1(&mut self) {
         self.cam = None;
         self.face = None;
-        self.eye = None;
+        self.mesh = None;
         self.obj = None;
     }
 }
@@ -728,7 +813,7 @@ pub fn spawn(rx: Receiver<Cmd>, tx: Sender<Msg>, wake: Box<dyn Fn() + Send>, pre
                 seq: 0,
                 cam: None,
                 face: None,
-                eye: None,
+                mesh: None,
                 obj: None,
                 last_objects: None,
                 calibration: Calibration::default(),
@@ -899,8 +984,9 @@ mod tests {
     use image::GenericImageView;
 
     #[test]
-    fn embedded_iris_model_loads_in_tract() {
-        EyeModel::load().unwrap();
+    fn embedded_models_load_in_tract() {
+        MeshModel::load().unwrap();
+        ObjectModel::load().unwrap();
     }
 
     #[test]

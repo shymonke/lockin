@@ -1,4 +1,4 @@
-//! Native windows: the always-on-top timer pill, the alert card and the CAT calculator.
+//! Native windows: the always-on-top timer pill, the alert card and the calculator.
 //! Visual language matches the dashboard (assets/app.css): soft slate, regular weights, gentle fades.
 
 use crate::app::{App, Level};
@@ -368,7 +368,7 @@ impl App {
     }
 
     fn calc_ui(&mut self, ui: &mut Ui) {
-        // TCS iON look: 214 px wide, grey body, blue title bar, red <- C +/-, green tall =.
+        // Test-calculator look: 214 px wide, grey body, blue title bar, red <- C +/-, green tall =.
         const BODY: Color32 = Color32::from_rgb(0xda, 0xda, 0xda);
         const EDGE: Color32 = Color32::from_rgb(0xaa, 0xaa, 0xaa);
         const KEY: Color32 = Color32::from_rgb(0xf1, 0xf1, 0xf1);

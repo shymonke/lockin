@@ -11,10 +11,12 @@ pub enum Hotkey {
     Brb,
     Settings,
     ClickThrough,
+    /// Tray menu only; no key combo.
+    Quit,
 }
 
 pub const ALL: [(Hotkey, char, &str); 5] = [
-    (Hotkey::Calculator, 'C', "CAT calculator"),
+    (Hotkey::Calculator, 'C', "Calculator"),
     (Hotkey::StartPause, 'P', "Start or pause the timer"),
     (Hotkey::Brb, 'B', "Step away, or I'm back"),
     (Hotkey::Settings, 'O', "Open LockIn"),

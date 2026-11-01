@@ -1,5 +1,5 @@
-//! CAT (TCS iON) "Normal Calculator", ported 1:1 from CAT Prep `dashboard-app/lib/cat-calculator.mjs`
-//! (itself rewritten from the live CAT 2025 mock calculator). Quirks are intentional:
+//! Basic on-screen "Normal Calculator" in the style of computer-based-test calculators.
+//! Quirks are intentional:
 //! the final "=" follows BODMAS (2 + 3 × 4 = 14) although the screen shows 5 after "×"; "a % b" means
 //! a × 0.01 × b; negative results show in brackets; MR then a digit appends to the recalled value;
 //! only MS lights the M marker.
@@ -207,7 +207,7 @@ impl Calc {
             self.clear_all();
             return Ok(());
         }
-        // Expression line (old TCS display logic).
+        // Expression line (legacy display logic).
         if self.stack_val1 == 2 {
             self.in_box1.clear();
         }
@@ -420,7 +420,7 @@ fn close_brackets(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    // Expected screens were read from the live CAT mock calculator (official complexCalculator.js) on 2026-10-13.
+    // Expected screens are the reference calculator's observed outputs.
     use super::*;
 
     fn run_from(mut c: Calc, keys: &[&str]) -> Calc {

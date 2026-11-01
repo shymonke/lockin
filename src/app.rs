@@ -118,7 +118,8 @@ impl App {
         let (atx, arx) = channel();
         audio::spawn(arx);
         let (ktx, krx) = channel();
-        hotkeys::spawn(ktx, Box::new(wake.clone()));
+        hotkeys::spawn(ktx.clone(), Box::new(wake.clone()));
+        crate::tray::spawn(ktx, Box::new(wake.clone()));
         let (dtx, dash_rx) = channel();
         let dash_shared = Arc::new(web::Shared {
             state: Mutex::new("{}".into()),
@@ -593,6 +594,10 @@ impl App {
                 Hotkey::Brb => self.brb_or_back(),
                 Hotkey::Settings => self.open_dashboard(),
                 Hotkey::ClickThrough => self.set_click_through(!self.click_through, ctx),
+                Hotkey::Quit => {
+                    self.shutdown();
+                    std::process::exit(0);
+                }
             }
         }
 
@@ -796,6 +801,7 @@ impl App {
 
     pub fn shutdown(&mut self) {
         let _ = self.vision.send(vision::Cmd::Quit);
+        crate::tray::remove();
         self.s.save();
         self.stats.save();
     }

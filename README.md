@@ -8,8 +8,10 @@ never captures pixels.
 ## What you see
 
 - **Timer bar** (always on top): clock, status ("On your book", "Back in 1:42", "Distracted"), and
-  buttons for start/pause, step away, the CAT calculator and the main window, and a ring that fills as the block runs. Drag it anywhere; set its resting opacity in Settings → Shortcuts (it turns fully visible on hover);
+  buttons for start/pause, step away, the calculator and the main window, and a ring that fills as the block runs. Drag it anywhere; set its resting opacity in Settings → Shortcuts (it turns fully visible on hover);
   double- or right-click opens the main window. Ctrl+Alt+L makes it click-through.
+- **Tray icon**: click opens the main window; right-click for start/pause, step away, the
+  calculator, click-through and Quit. LockIn has no taskbar button.
 - **Main window** (Ctrl+Alt+O): your live camera with the tracking drawn over it — eye outlines,
   irises, a gaze arrow and a plain-language label ("Looking at your book", 87 %). Below it the session
   clock, start / step-away buttons and today's numbers. Settings slide in from the right. A short
@@ -17,8 +19,8 @@ never captures pixels.
   shows only the tracking lines (screen sharing).
 - **Alert cards**: warnings, alarms and questions with painted cats (scuba cat and friends) or your
   own GIFs, plus a built-in or custom sound.
-- **CAT calculator** (Ctrl+Alt+C): 1:1 port of the TCS iON Normal Calculator from CAT Prep
-  (`dashboard-app/lib/cat-calculator.mjs`), same quirks and test cases.
+- **Calculator** (Ctrl+Alt+C): a small on-screen calculator with memory keys, styled like the basic
+  calculators used in computer-based tests.
 
 ## How it decides
 
@@ -39,11 +41,15 @@ flowchart LR
   R -- confirmed --> A[alarm: sound + cat + penalties]
 ```
 
-- **Gaze**: YuNet finds the face and 5 points; the MediaPipe iris model reads each eye (contour,
-  iris centre, openness). Twelve features (head yaw/pitch/roll, iris x/y per eye, eye openness, face
-  size and position) feed a small per-user classifier trained by calibration.
+- **Gaze**: YuNet finds the face; MediaPipe Face Landmarker reads a 478-point mesh on it (eye
+  outlines, irises, head pose) and 52 blendshapes (eye-look up/down/in/out). Fourteen features (head
+  yaw/pitch/roll, iris x/y per eye, eye openness, face size and position, horizontal and vertical eye
+  look) feed a small per-user classifier trained by calibration.
+- **Phone and person**: RTMDet-tiny (COCO) runs only when the face is lost or the head has been down
+  for a while; two phone sightings in a row ring the phone alarm.
 - **Calibration** (main window → Calibrate, ~15 s): follow a dot that lands on each spot with a soft note (beats keep time on the other steps), read your book, then
   look around the room. Redo it when you move the laptop. Uncalibrated, LockIn falls back to head pose.
+  Calibrations saved by older versions (different features) are dropped on start; calibrate again.
 - **Sites**: the first visit to a blocked site warns; the second visit, or staying past the limit,
   rings the alarm. Ask-sites (YouTube, Reddit) get "for study or distraction?". App names such as
   `discord.exe` work too.
@@ -58,13 +64,14 @@ flowchart LR
 |---|---|
 | Ctrl+Alt+P | Start / pause |
 | Ctrl+Alt+B | Step away / I'm back |
-| Ctrl+Alt+C | CAT calculator |
+| Ctrl+Alt+C | Calculator |
 | Ctrl+Alt+O | Main window |
 | Ctrl+Alt+L | Timer bar click-through on/off |
 
 ## Resource use
 
-Measured on the release build (HP laptop, integrated GPU, 150 % scaling). "All processes" includes the
+Measured on the release build (HP laptop, integrated GPU, 150 % scaling) with the previous models
+(Iris + NanoDet); the per-check times below are for the current ones. "All processes" includes the
 WebView2 helpers that exist only while the main window is open. CPU is the share of all cores.
 
 | State | LockIn private | All processes private | CPU |
@@ -75,7 +82,8 @@ WebView2 helpers that exist only while the main window is open. CPU is the share
 | Main window closed again | 46 MB | 46 MB | 0.0 % |
 
 Closing the main window ends its WebView2 processes. It runs without a GPU process and with a single
-renderer to stay small. Per check: face + both eyes 17–35 ms, object model ≈ 100–150 ms (one core).
+renderer to stay small. Per check (release, 1280×720): face + mesh + blendshapes 45–50 ms, object
+model 145–160 ms (one core).
 
 ## Build and run
 
@@ -92,7 +100,7 @@ files together.
 
 Diagnostics (print only, nothing saved):
 
-- `lockin --diag` runs 10 s of live camera: face, eyes, head pose, gaze label, person/phone, timings.
+- `lockin --diag` runs 10 s of live camera: face, mesh, head pose, eye look, gaze label, person/phone, timings.
 - `lockin --diag img1.jpg img2.png` runs the same on images.
 - `lockin --diag-screen` prints what the screen layer sees (app, title, URL) for 15 s.
 
@@ -118,9 +126,11 @@ Debug builds serve `assets/` from disk: edit HTML/CSS/JS and press F5 in the mai
 
 ## Credits
 
+Model sources, licenses and conversions: `models/NOTICE.md`; `scripts/fetch_models.py` rebuilds them.
+
 - YuNet face detector (OpenCV Zoo, MIT); input shape relaxed for 256×192.
-- MediaPipe Iris landmark model (Apache-2.0), ONNX conversion via PINTO_model_zoo; see `models/iris.NOTICE`.
-- NanoDet-Plus (OpenCV Zoo, Apache-2.0).
+- MediaPipe Face Landmarker: face mesh and blendshape models (Google, Apache-2.0), converted to ONNX.
+- RTMDet-tiny (OpenMMLab, Apache-2.0), cut before NMS.
 - Icons: [Phosphor](https://phosphoricons.com) (MIT), subset in `assets/fonts/`.
 - Inference: [tract](https://github.com/sonos/tract). Native UI: [egui](https://github.com/emilk/egui).
   Main window: [wry](https://github.com/tauri-apps/wry) on WebView2.

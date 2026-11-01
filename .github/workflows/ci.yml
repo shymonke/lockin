@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        id: msys2
+        with:
+          msystem: UCRT64
+          update: false
+          install: mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-binutils
+
+      - name: Put MinGW on PATH
+        shell: pwsh
+        run: Add-Content $env:GITHUB_PATH "${{ steps.msys2.outputs.msys2-location }}\ucrt64\bin"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable-x86_64-pc-windows-gnu
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --release --all-targets
+
+      - name: Test
+        run: cargo test --release
+
+      - name: Build
+        run: cargo build --release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lockin-windows-x64
+          path: |
+            target/release/lockin.exe
+            target/release/WebView2Loader.dll

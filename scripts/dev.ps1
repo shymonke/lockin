@@ -18,7 +18,7 @@ public static class LockInDevConsole {
 $null = [LockInDevConsole]::SetConsoleCtrlHandler([IntPtr]::Zero, $false)
 $repo = Split-Path -Parent $PSScriptRoot
 if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
-    $env:PATH = 'C:\Users\monke\.cargo\bin;C:\Users\monke\AppData\Local\Microsoft\WinGet\Packages\BrechtSanders.WinLibs.POSIX.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe\mingw64\bin;' + $env:PATH
+    $env:PATH = "$env:USERPROFILE\.cargo\bin;$env:LOCALAPPDATA\Microsoft\WinGet\Packages\BrechtSanders.WinLibs.POSIX.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe\mingw64\bin;" + $env:PATH
 }
 $cargo = (Get-Command cargo -ErrorAction Stop).Source
 $profile = if ($Release) { 'release' } else { 'debug' }
