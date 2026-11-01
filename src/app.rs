@@ -10,6 +10,7 @@ use crate::memes::{self, CatStyle, UserMeme};
 use crate::policy::{Action, Foreground, Gaze, Kind, Policy};
 use crate::pomodoro::{Event, Phase, Pomodoro};
 use crate::screen;
+use crate::tasks::{self, TaskStore};
 use crate::vision::{self, CalTarget, EyeOverlay, Face, Objects, PreviewSlot};
 use crate::web;
 use eframe::egui;
@@ -30,6 +31,7 @@ pub struct Alert {
     pub level: Level,
     pub kind: Option<Kind>,
     pub ask_domain: Option<String>,
+    pub task_question: Option<u64>,
     pub line: copy::Line,
     pub opened: Instant,
     pub auto_close: Option<f32>,
@@ -68,6 +70,7 @@ pub struct App {
     saved_s: Settings,
     dirty_at: Option<Instant>,
     pub stats: Stats,
+    pub tasks: TaskStore,
     pub pomo: Pomodoro,
     pub policy: Policy,
     pub vision: Sender<vision::Cmd>,
@@ -94,6 +97,10 @@ pub struct App {
     pub calc_spawn: Option<[f32; 2]>,
     pub cal: CalState,
     pub click_through: bool,
+    pub pill_adding: bool,
+    pub pill_add_idea: bool,
+    pub pill_add_text: String,
+    pub pill_return_hwnd: isize,
     dash: web::Dashboard,
     dash_shared: Arc<web::Shared>,
     dash_rx: Receiver<Value>,
@@ -148,6 +155,7 @@ impl App {
             s,
             dirty_at: None,
             stats: Stats::load(),
+            tasks: TaskStore::load(),
             policy: Policy::default(),
             vision: vtx,
             vision_rx: vmsg_rx,
@@ -177,6 +185,10 @@ impl App {
             calc_spawn: None,
             cal: CalState::default(),
             click_through,
+            pill_adding: false,
+            pill_add_idea: false,
+            pill_add_text: String::new(),
+            pill_return_hwnd: 0,
             dash: web::Dashboard::default(),
             dash_shared,
             dash_rx,
@@ -267,6 +279,27 @@ impl App {
         if !study && alert.remember && !self.s.blocked_sites.contains(&domain) {
             self.s.blocked_sites.push(domain.clone());
             self.s.ask_sites.retain(|d| d != &domain);
+        }
+    }
+
+    pub fn answer_task_question(&mut self, done: bool) {
+        let Some(alert) = self.alert.take() else { return };
+        let Some(id) = alert.task_question else {
+            self.alert = Some(alert);
+            return;
+        };
+        if done {
+            self.tasks.complete_task(id, &crate::config::today_string(), tasks::now_secs());
+        }
+        self.tasks.save();
+    }
+
+    pub fn complete_task_now(&mut self, id: u64) {
+        if self.tasks.complete_task(id, &crate::config::today_string(), tasks::now_secs()) {
+            if self.alert.as_ref().is_some_and(|a| a.task_question == Some(id)) {
+                self.alert = None;
+            }
+            self.tasks.save();
         }
     }
 
@@ -368,6 +401,37 @@ impl App {
             "skip" => self.skip_phase(),
             "reset" => self.reset_timer(),
             "settings" => self.apply_patch(&v["patch"], ctx),
+            "task-add" => {
+                self.tasks.add_task(v["title"].as_str().unwrap_or_default(), v["estimate"].as_u64().unwrap_or(1) as u32, tasks::now_secs());
+                self.tasks.save();
+            }
+            "task-rename" => {
+                if let Some(id) = v["id"].as_u64() { self.tasks.rename_task(id, v["title"].as_str().unwrap_or_default()); self.tasks.save(); }
+            }
+            "task-delete" => {
+                if let Some(id) = v["id"].as_u64() { self.tasks.delete_task(id); self.tasks.save(); }
+            }
+            "task-move" => {
+                if let Some(id) = v["id"].as_u64() { self.tasks.move_task(id, v["delta"].as_i64().unwrap_or(0) as i32); self.tasks.save(); }
+            }
+            "task-estimate" => {
+                if let Some(id) = v["id"].as_u64() { self.tasks.set_estimate(id, v["estimate"].as_u64().unwrap_or(1) as u32); self.tasks.save(); }
+            }
+            "task-active" => {
+                if let Some(id) = v["id"].as_u64() { self.tasks.set_active(id); self.tasks.save(); }
+            }
+            "task-complete" => {
+                if let Some(id) = v["id"].as_u64() { self.complete_task_now(id); }
+            }
+            "idea-add" => {
+                self.tasks.add_idea(v["title"].as_str().unwrap_or_default(), tasks::now_secs()); self.tasks.save();
+            }
+            "idea-toggle" => {
+                if let Some(id) = v["id"].as_u64() { self.tasks.toggle_idea(id); self.tasks.save(); }
+            }
+            "idea-delete" => {
+                if let Some(id) = v["id"].as_u64() { self.tasks.delete_idea(id); self.tasks.save(); }
+            }
             "calibrate" => {
                 if let Some(t) = cal_target(v["target"].as_str().unwrap_or_default()) {
                     self.calibrate(t);
@@ -415,6 +479,8 @@ impl App {
         let goal_streak = self.stats.goal_streak(goal);
         let clean = self.stats.clean_streak;
         let day = self.stats.today().clone();
+        let task_today = crate::config::today_string();
+        let task_year_total: u32 = self.tasks.history.iter().rev().take(366).map(|d| d.completed_focus).sum();
         let every = self.s.long_break_every.max(1);
         let sounds: Vec<[String; 2]> = audio::BUILTINS
             .iter()
@@ -462,6 +528,15 @@ impl App {
                 "clean_streak": clean,
                 "goal_streak": goal_streak,
             },
+            "task_data": {
+                "tasks": self.tasks.tasks,
+                "ideas": self.tasks.ideas,
+                "history": self.tasks.history,
+                "active": self.tasks.active_task,
+                "today": task_today,
+                "streak": self.tasks.current_streak(&task_today),
+                "year_total": task_year_total,
+            },
             "settings": self.s,
             "tour_done": self.s.tour_done,
             "hotkeys": hotkeys::ALL.iter().map(|(_, k, d)| [k.to_string(), d.to_string()]).collect::<Vec<_>>(),
@@ -478,6 +553,7 @@ impl App {
             level: Level::Info,
             kind: None,
             ask_domain: None,
+            task_question: None,
             line,
             opened: Instant::now(),
             auto_close: Some(secs),
@@ -496,6 +572,7 @@ impl App {
             line: copy::warn(&kind, self.s.brainrot),
             kind: Some(kind),
             ask_domain: None,
+            task_question: None,
             opened: Instant::now(),
             auto_close: Some(10.0),
             cat,
@@ -532,6 +609,10 @@ impl App {
         let mut added = 0;
         if penalize {
             added = self.pomo.penalize(&self.s);
+            if self.pomo.phase == Phase::Focus {
+                self.tasks.add_distraction();
+                self.tasks.save();
+            }
             let day = self.stats.today();
             day.distractions += 1;
             if self.s.penalty_score {
@@ -552,6 +633,7 @@ impl App {
             line: copy::alarm(&kind, self.s.brainrot),
             kind: Some(kind),
             ask_domain: None,
+            task_question: None,
             opened: Instant::now(),
             auto_close: None,
             cat,
@@ -571,6 +653,7 @@ impl App {
                         line: copy::warn(&kind, self.s.brainrot),
                         kind: Some(kind),
                         ask_domain: None,
+                        task_question: None,
                         opened: Instant::now(),
                         auto_close: Some(8.0),
                         cat,
@@ -590,6 +673,7 @@ impl App {
                         line: copy::ask(&domain, self.s.brainrot),
                         kind: None,
                         ask_domain: Some(domain),
+                        task_question: None,
                         opened: Instant::now(),
                         auto_close: None,
                         cat: None,
@@ -761,7 +845,24 @@ impl App {
                     if self.alarm_active() {
                         self.clear_alarm(false);
                     }
-                    self.info(copy::phase_done(true, self.s.brainrot), 8.0);
+                    let task = self.tasks.focus_completed(&crate::config::today_string());
+                    self.tasks.save();
+                    if let Some((id, title)) = task {
+                        self.alert = Some(Alert {
+                            level: Level::Ask,
+                            kind: None,
+                            ask_domain: None,
+                            task_question: Some(id),
+                            line: copy::Line { title: format!("Done with {title}?"), body: "Mark it done, or carry it into the next focus block.".into() },
+                            opened: Instant::now(),
+                            auto_close: None,
+                            cat: None,
+                            added_secs: 0,
+                            remember: false,
+                        });
+                    } else {
+                        self.info(copy::phase_done(true, self.s.brainrot), 8.0);
+                    }
                     let _ = self.audio.send(audio::Cmd::Warn { volume: self.s.volume });
                 }
                 Event::PhaseEnded(_) => {
@@ -774,7 +875,9 @@ impl App {
         }
         let earned = self.pomo.earned_secs - self.earned_seen;
         if earned >= 1.0 {
-            self.stats.today().focus_secs += earned as u64;
+            let seconds = earned as u64;
+            self.stats.today().focus_secs += seconds;
+            self.tasks.add_earned_secs(&crate::config::today_string(), seconds);
             self.earned_seen += earned.floor();
         }
 
@@ -798,6 +901,7 @@ impl App {
         }
         if self.last_stats_save.elapsed().as_secs() >= 60 {
             self.stats.save();
+            self.tasks.save();
             self.last_stats_save = Instant::now();
         }
 
@@ -864,6 +968,7 @@ impl App {
         crate::tray::remove();
         self.s.save();
         self.stats.save();
+        self.tasks.save();
     }
 }
 

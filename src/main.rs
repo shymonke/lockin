@@ -14,6 +14,7 @@ mod policy;
 mod pomodoro;
 mod screen;
 mod theme;
+mod tasks;
 mod tray;
 mod ui;
 mod vision;
