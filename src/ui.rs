@@ -11,7 +11,7 @@ use eframe::egui::{
     ViewportCommand, ViewportId,
 };
 
-pub const PILL: egui::Vec2 = vec2(352.0, 60.0);
+pub const PILL: egui::Vec2 = vec2(386.0, 60.0);
 
 fn mmss(secs: f64) -> String {
     let s = secs.max(0.0).ceil() as u64;
@@ -33,6 +33,30 @@ fn icon_button(ui: &mut Ui, rect: Rect, id: &str, tip: &str, glyph: char, ink: O
     p.circle_filled(rect.center(), rect.width() / 2.0, wash.gamma_multiply(hover));
     let ink = ink.unwrap_or_else(|| theme::MUTED.lerp_to_gamma(theme::TEXT, hover));
     p.text(rect.center(), Align2::CENTER_CENTER, glyph, theme::icons(18.0), ink);
+    r.clicked()
+}
+
+/// Camera toggle drawn with the painter (the Phosphor subset has no camera glyph); slashed when off.
+fn camera_button(ui: &mut Ui, rect: Rect, on: bool) -> bool {
+    let tip = if on { "Camera on: click to turn it off (Ctrl+Alt+K)" } else { "Camera off: click to turn it on (Ctrl+Alt+K)" };
+    let r = ui.interact(rect, ui.scope_id().with("cam"), Sense::click()).on_hover_text(tip);
+    let hover = ui.ctx().animate_bool_with_time(r.id, r.hovered(), 0.15);
+    let p = ui.painter();
+    let wash = if r.is_pointer_button_down_on() { theme::HOVER } else { theme::RAISED };
+    p.circle_filled(rect.center(), rect.width() / 2.0, wash.gamma_multiply(hover));
+    let ink = if on { theme::MUTED.lerp_to_gamma(theme::TEXT, hover) } else { theme::CAUTION };
+    let stroke = Stroke::new(1.5, ink);
+    let c = rect.center();
+    let body = Rect::from_center_size(c + vec2(0.0, 1.0), vec2(16.0, 11.0));
+    p.rect_stroke(body, CornerRadius::same(3), stroke, StrokeKind::Middle);
+    p.line_segment([pos2(c.x - 3.5, body.top()), pos2(c.x - 2.0, body.top() - 2.5)], stroke);
+    p.line_segment([pos2(c.x - 2.0, body.top() - 2.5), pos2(c.x + 2.0, body.top() - 2.5)], stroke);
+    p.line_segment([pos2(c.x + 2.0, body.top() - 2.5), pos2(c.x + 3.5, body.top())], stroke);
+    p.circle_stroke(body.center(), 3.0, stroke);
+    if !on {
+        p.line_segment([pos2(c.x - 9.0, c.y - 8.0), pos2(c.x + 9.0, c.y + 9.0)], Stroke::new(3.5, Color32::from_rgb(27, 31, 39)));
+        p.line_segment([pos2(c.x - 9.0, c.y - 8.0), pos2(c.x + 9.0, c.y + 9.0)], stroke);
+    }
     r.clicked()
 }
 
@@ -97,6 +121,9 @@ impl App {
 
     /// Root viewport: the always-on-top timer bar.
     pub fn pill_ui(&mut self, ui: &mut Ui) {
+        if (self.cal.ball_pending || self.cal.ball.is_some()) && self.ball_frame(ui) {
+            return;
+        }
         let ctx = ui.ctx().clone();
         let full = ui.max_rect();
         let rect = Rect::from_min_size(full.min, PILL).shrink(2.0);
@@ -166,7 +193,7 @@ impl App {
             x -= size + 2.0;
             r
         };
-        let (app, calc, brb, play) = (next(), next(), next(), next());
+        let (app, calc, cam, brb, play) = (next(), next(), next(), next(), next());
         let divider = play.left() - 8.0;
         p.line_segment([pos2(divider, cy - 13.0), pos2(divider, cy + 13.0)], Stroke::new(1.0, theme::LINE));
         if icon_button(ui, app, "app", "Open LockIn (Ctrl+Alt+O)", icon::APP, None) {
@@ -178,6 +205,9 @@ impl App {
                 self.calc.open();
                 self.calc_min = false;
             }
+        }
+        if camera_button(ui, cam, self.s.camera_enabled) {
+            self.toggle_camera();
         }
         let back = self.pomo.brb.is_some() || self.alarm_active();
         let can_step_away = self.pomo.focusing();

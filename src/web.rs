@@ -77,6 +77,21 @@ impl Dashboard {
             .spawn(move || run(slot, shared))
             .expect("spawn dashboard thread");
     }
+
+    /// Hide the window without closing it (screen calibration), or bring it back.
+    pub fn set_hidden(&self, hidden: bool) {
+        let h = self.hwnd.load(Ordering::Acquire);
+        if h <= 0 {
+            return;
+        }
+        let hwnd = HWND(h as *mut _);
+        unsafe {
+            let _ = ShowWindowAsync(hwnd, if hidden { SW_HIDE } else { SW_SHOW });
+            if !hidden {
+                let _ = SetForegroundWindow(hwnd);
+            }
+        }
+    }
 }
 
 struct Hwnd(isize);

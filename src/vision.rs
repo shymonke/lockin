@@ -217,6 +217,25 @@ impl Mesh {
             ((y - 0.5) * 2.0).clamp(-1.0, 1.0),
         ]
     }
+
+    /// Face box and YuNet-style five landmarks (eyes = iris centres, nose tip, mouth corners)
+    /// taken from the mesh, in normalised frame coordinates.
+    pub(crate) fn face_box(&self, score: f32, aspect: f32) -> Face {
+        let mut min = [f32::INFINITY; 2];
+        let mut max = [f32::NEG_INFINITY; 2];
+        for p in &self.points {
+            for d in 0..2 {
+                min[d] = min[d].min(p[d]);
+                max[d] = max[d].max(p[d]);
+            }
+        }
+        Face {
+            score,
+            rect: [min[0], min[1], max[0] - min[0], max[1] - min[1]],
+            landmarks: [468, 473, 1, 61, 291].map(|i| self.points[i]),
+            aspect,
+        }
+    }
 }
 
 /// Mesh indices for one eye: 16-point lid contour (outer corner, lower lid, inner corner, upper
@@ -448,8 +467,17 @@ pub(crate) fn feature_sample(face: &Face, mesh: &Mesh) -> FeatureSample {
             p.center[1],
             mesh.look[0],
             mesh.look[1],
+            gaze_pitch(h[1], (r.iris_y + l.iris_y) * 0.5),
         ],
     }
+}
+
+/// Head pitch plus the eyes' vertical rotation in the head (degrees, positive = down). `iris_y`
+/// is offset from the lid centre in eye widths ×3 (see `eye_measure`); an eye is ~2.5× wider than
+/// its eyeball radius, so the offset maps to an angle via asin.
+fn gaze_pitch(head_pitch: f32, iris_y: f32) -> f32 {
+    let eye = ((iris_y - 0.5) / 3.0 * 2.5).clamp(-1.0, 1.0).asin().to_degrees();
+    head_pitch + eye
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -553,6 +581,9 @@ const PHONE_MIN: f32 = 0.4;
 const FAST_SECS: f64 = 0.7;
 const PREVIEW_SECS: f64 = 1.0 / 12.0;
 const L2_IDLE_DROP: Duration = Duration::from_secs(60);
+/// A mesh older than this no longer seeds the next crop (the head may have moved a lot); the
+/// 3 s monitor checks always re-detect, the 12 fps preview and calibration track.
+const TRACK_MAX_AGE: Duration = Duration::from_millis(500);
 
 struct Analysis {
     face: Option<Face>,
@@ -576,6 +607,9 @@ struct Worker {
     last_objects: Option<Objects>,
     calibration: Calibration,
     frame: Frame,
+    /// Face box from the previous frame's mesh: seeds the next crop so YuNet only runs to
+    /// (re)acquire the face, as in MediaPipe's tracking mode.
+    track: Option<(Face, Instant)>,
 }
 
 impl Worker {
@@ -605,21 +639,31 @@ impl Worker {
         cam.grab(&mut self.frame)
             .map_err(|e| format!("Camera read failed: {}", e.message()))?;
         let t = Instant::now();
-        let face = self
-            .face
-            .as_ref()
-            .unwrap()
-            .detect(&self.frame)
-            .map_err(|e| e.to_string())?;
-        let mesh = match &face {
-            Some(f) => self
-                .mesh
-                .as_ref()
-                .unwrap()
-                .detect(&self.frame, f)
-                .map_err(|e| e.to_string())?,
+        let face_model = self.face.as_ref().unwrap();
+        let mesh_model = self.mesh.as_ref().unwrap();
+        let fresh = self.track.take().filter(|(_, at)| at.elapsed() < TRACK_MAX_AGE).map(|(f, _)| f);
+        let mut mesh = match &fresh {
+            Some(seed) => mesh_model.detect(&self.frame, seed).map_err(|e| e.to_string())?,
             None => None,
         };
+        // No track, or the face left the tracked crop: detect it again.
+        let detected = if mesh.is_none() {
+            let d = face_model.detect(&self.frame).map_err(|e| e.to_string())?;
+            if let Some(f) = &d {
+                mesh = mesh_model.detect(&self.frame, f).map_err(|e| e.to_string())?;
+            }
+            d
+        } else {
+            None
+        };
+        // Features and the box always come from the mesh when there is one, so tracked and
+        // freshly detected frames measure the face the same way.
+        let score = detected.or(fresh).map_or(1.0, |f| f.score);
+        let face = match &mesh {
+            Some(m) => Some(m.face_box(score, self.frame.width as f32 / self.frame.height as f32)),
+            None => detected,
+        };
+        self.track = mesh.as_ref().and(face).map(|f| (f, Instant::now()));
         let l1_ms = t.elapsed().as_secs_f32() * 1000.0;
         let feature = face
             .as_ref()
@@ -725,11 +769,15 @@ impl Worker {
         show_preview: bool,
     ) -> Result<Vec<FeatureSample>, String> {
         self.ensure(index)?;
-        const COUNT: usize = 34;
         const STEP: Duration = Duration::from_millis(150);
+        // The screen step lasts the whole ball tour (spots plus the head nod).
+        let count = match target {
+            CalTarget::Screen => (crate::ball::SAMPLE_SECS / STEP.as_secs_f32()).round() as usize,
+            _ => 34,
+        };
         let started = Instant::now();
-        let mut samples = Vec::with_capacity(COUNT);
-        for i in 0..COUNT {
+        let mut samples = Vec::with_capacity(count);
+        for i in 0..count {
             let a = self.capture(false)?;
             if let Some(s) = a.feature.clone() {
                 samples.push(s);
@@ -737,10 +785,10 @@ impl Worker {
             if show_preview {
                 self.preview(&a)?;
             }
-            if i % 2 == 0 || i + 1 == COUNT {
+            if i % 2 == 0 || i + 1 == count {
                 self.send(Msg::CalProgress {
                     target,
-                    progress: (i + 1) as f32 / COUNT as f32,
+                    progress: (i + 1) as f32 / count as f32,
                     samples: samples.len(),
                 });
             }
@@ -770,6 +818,7 @@ impl Worker {
         self.cam = None;
         self.face = None;
         self.mesh = None;
+        self.track = None;
         self.obj = None;
     }
 }
@@ -822,6 +871,7 @@ pub fn spawn(rx: Receiver<Cmd>, tx: Sender<Msg>, wake: Box<dyn Fn() + Send>, pre
                     height: 0,
                     bgra: Vec::new(),
                 },
+                track: None,
             };
             let mut running: Option<(u32, f64)> = None;
             let mut previewing = false;
@@ -830,6 +880,9 @@ pub fn spawn(rx: Receiver<Cmd>, tx: Sender<Msg>, wake: Box<dyn Fn() + Send>, pre
             let mut want_l2 = false;
             let mut next_monitor = Instant::now();
             let mut next_preview = Instant::now();
+            // Label of the last emitted check: a change gets confirmed after FAST_SECS instead of a full interval.
+            let mut last_gaze: Option<Gaze> = None;
+            let mut gaze_changed = false;
             loop {
                 let active = running.is_some() || previewing;
                 let deadline = match (running.is_some(), previewing) {
@@ -861,6 +914,7 @@ pub fn spawn(rx: Receiver<Cmd>, tx: Sender<Msg>, wake: Box<dyn Fn() + Send>, pre
                         running = None;
                         fast = false;
                         want_l2 = false;
+                        last_gaze = None;
                         if !previewing {
                             w.release_l1();
                         }
@@ -938,8 +992,16 @@ pub fn spawn(rx: Receiver<Cmd>, tx: Sender<Msg>, wake: Box<dyn Fn() + Send>, pre
                     .and_then(|_| w.capture(monitor_due && want_l2));
                 match res {
                     Ok(a) => {
-                        if monitor_due {
+                        // While the main window previews, every analysed frame also feeds the
+                        // policy: the work is already done, and the timer bar then keeps pace
+                        // with the preview.
+                        if running.is_some() {
                             w.emit(&a);
+                            let g = a.gaze.map(|g| g.0);
+                            gaze_changed = last_gaze.is_some() && g != last_gaze;
+                            last_gaze = g;
+                        }
+                        if monitor_due {
                             want_l2 = false;
                         }
                         if preview_due {
@@ -960,6 +1022,10 @@ pub fn spawn(rx: Receiver<Cmd>, tx: Sender<Msg>, wake: Box<dyn Fn() + Send>, pre
                     let interval = running.unwrap().1;
                     next_monitor = Instant::now()
                         + Duration::from_secs_f64(if fast { FAST_SECS } else { interval });
+                }
+                if gaze_changed {
+                    next_monitor = next_monitor.min(Instant::now() + Duration::from_secs_f64(FAST_SECS));
+                    gaze_changed = false;
                 }
                 if preview_due {
                     next_preview += Duration::from_secs_f64(PREVIEW_SECS);

@@ -19,8 +19,10 @@ pub struct Pose {
 }
 
 /// Head yaw/pitch/roll (degrees), iris x/y per eye, eye openness per eye, face area, face centre
-/// x/y, and the averaged horizontal/vertical eye-look blendshapes.
-pub const GAZE_FEATURES: usize = 14;
+/// x/y, the averaged horizontal/vertical eye-look blendshapes, and gaze pitch (head pitch plus the
+/// eyes' vertical turn in the head, degrees): tipping the head down while the eyes stay on the
+/// screen leaves it unchanged.
+pub const GAZE_FEATURES: usize = 15;
 
 /// One eye/head observation used by the per-user gaze classifier.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]

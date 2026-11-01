@@ -2,6 +2,7 @@
 
 mod app;
 mod audio;
+mod ball;
 mod calc;
 mod camera;
 mod config;
@@ -103,6 +104,10 @@ fn diag(images: &[String]) {
         let d = face.detect(f).unwrap();
         let m = d.as_ref().and_then(|d| mesh.detect(f, d).unwrap());
         let l1 = t.elapsed().as_secs_f64() * 1e3;
+        // Tracking path: the next preview frame seeds the crop from this mesh and skips YuNet.
+        let t = Instant::now();
+        let tracked = m.as_ref().map(|m| mesh.detect(f, &m.face_box(1.0, f.width as f32 / f.height as f32)).unwrap().is_some());
+        let l1_tracked = t.elapsed().as_secs_f64() * 1e3;
         let t = Instant::now();
         let o = obj.detect(f).unwrap();
         let l2 = t.elapsed().as_secs_f64() * 1e3;
@@ -116,7 +121,7 @@ fn diag(images: &[String]) {
                     .and_then(|s| policy::classify_gaze_features(s, &calibration))
                     .unwrap_or((policy::classify_gaze(d.pose(), &calibration), 0.45));
                 println!(
-                    "  face {:.2} rect {:?} head {:?} gaze {:?} look {:?} label {:?} confidence {:.2} | person {:.2} phone {:.2} | L1+mesh {l1:.1} ms L2 {l2:.1} ms",
+                    "  face {:.2} rect {:?} head {:?} gaze {:?} look {:?} label {:?} confidence {:.2} | person {:.2} phone {:.2} | L1+mesh {l1:.1} ms, tracked mesh {l1_tracked:.1} ms (kept face: {tracked:?}) L2 {l2:.1} ms",
                     d.score,
                     d.rect.map(|v| (v * 100.0).round() / 100.0),
                     m.as_ref().map(|m| m.head().map(|v| (v * 10.0).round() / 10.0)),

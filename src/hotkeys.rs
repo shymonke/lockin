@@ -11,16 +11,18 @@ pub enum Hotkey {
     Brb,
     Settings,
     ClickThrough,
+    Camera,
     /// Tray menu only; no key combo.
     Quit,
 }
 
-pub const ALL: [(Hotkey, char, &str); 5] = [
+pub const ALL: [(Hotkey, char, &str); 6] = [
     (Hotkey::Calculator, 'C', "Calculator"),
     (Hotkey::StartPause, 'P', "Start or pause the timer"),
     (Hotkey::Brb, 'B', "Step away, or I'm back"),
     (Hotkey::Settings, 'O', "Open LockIn"),
     (Hotkey::ClickThrough, 'L', "Timer bar click-through on or off"),
+    (Hotkey::Camera, 'K', "Camera on or off"),
 ];
 
 pub fn spawn(tx: Sender<Hotkey>, wake: Box<dyn Fn() + Send>) {

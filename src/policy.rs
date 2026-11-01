@@ -165,7 +165,13 @@ pub fn classify_gaze_features(sample: &FeatureSample, cal: &Calibration) -> Opti
     const OUTLIER_D2: f32 = 16.0;
     // Avoid giving effectively infinite weight to a feature that did not happen to move during calibration.
     const SCALE_FLOOR: [f32; GAZE_FEATURES] =
-        [5.0, 5.0, 5.0, 0.05, 0.05, 0.05, 0.05, 0.04, 0.04, 0.01, 0.03, 0.03, 0.05, 0.05];
+        [5.0, 5.0, 5.0, 0.05, 0.05, 0.05, 0.05, 0.04, 0.04, 0.01, 0.03, 0.03, 0.05, 0.05, 5.0];
+    // Eyes first, head light: head angles and face placement shift when you tip your head toward
+    // the keyboard while still reading the screen, so they only nudge the decision. A large head
+    // turn still stands out as an outlier and reads as Away.
+    const WEIGHT: [f32; GAZE_FEATURES] =
+        [0.35, 0.3, 0.2, 1.0, 1.0, 1.0, 1.0, 0.8, 0.8, 0.25, 0.25, 0.25, 1.0, 1.0, 1.5];
+    let weight_sum: f32 = WEIGHT.iter().sum();
     let classes: [(&[FeatureSample], Gaze); 3] = [
         (&cal.screen_samples, Gaze::Screen),
         (&cal.book_samples, Gaze::Book),
@@ -219,8 +225,8 @@ pub fn classify_gaze_features(sample: &FeatureSample, cal: &Calibration) -> Opti
         for i in 0..GAZE_FEATURES {
             let v = cv[i].max(VAR_FLOOR);
             let q = (z[i] - cm[i]).powi(2) / v;
-            d2 += q / GAZE_FEATURES as f32;
-            nll += (q + v.ln()) / GAZE_FEATURES as f32;
+            d2 += WEIGHT[i] * q / weight_sum;
+            nll += WEIGHT[i] * (q + v.ln()) / weight_sum;
         }
         scored[ci] = (*gaze, d2, nll);
     }
@@ -619,9 +625,9 @@ mod tests {
     }
 
     fn trained_calibration() -> Calibration {
-        let screen = [0.0, 0.0, 0.0, 0.50, 0.35, 0.50, 0.35, 0.28, 0.28, 0.08, 0.50, 0.48, 0.0, 0.05];
-        let book = [1.0, 14.0, 0.5, 0.51, 0.73, 0.49, 0.72, 0.24, 0.24, 0.07, 0.50, 0.56, 0.0, -0.45];
-        let away = [25.0, -4.0, 5.0, 0.78, 0.52, 0.76, 0.51, 0.25, 0.25, 0.06, 0.62, 0.48, 0.5, 0.0];
+        let screen = [0.0, 0.0, 0.0, 0.50, 0.35, 0.50, 0.35, 0.28, 0.28, 0.08, 0.50, 0.48, 0.0, 0.05, -7.0];
+        let book = [1.0, 14.0, 0.5, 0.51, 0.73, 0.49, 0.72, 0.24, 0.24, 0.07, 0.50, 0.56, 0.0, -0.45, 25.0];
+        let away = [25.0, -4.0, 5.0, 0.78, 0.52, 0.76, 0.51, 0.25, 0.25, 0.06, 0.62, 0.48, 0.5, 0.0, 0.0];
         Calibration {
             screen_samples: cluster(screen),
             book_samples: cluster(book),
@@ -642,6 +648,18 @@ mod tests {
             assert_eq!(actual, expected);
             assert!(confidence > 0.5, "confidence {confidence}");
         }
+    }
+
+    #[test]
+    fn head_tipped_down_with_eyes_on_screen_stays_screen() {
+        let cal = trained_calibration();
+        // Head pitched and placed like the book pose, but the eyes rolled up to the screen, so the
+        // combined gaze pitch matches the screen pose.
+        let sample = FeatureSample {
+            values: vec![1.0, 14.0, 0.5, 0.50, 0.10, 0.50, 0.10, 0.30, 0.30, 0.07, 0.50, 0.56, 0.0, 0.30, -5.5],
+        };
+        let (gaze, _) = classify_gaze_features(&sample, &cal).unwrap();
+        assert_eq!(gaze, Gaze::Screen);
     }
 
     #[test]

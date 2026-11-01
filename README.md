@@ -8,7 +8,7 @@ never captures pixels.
 ## What you see
 
 - **Timer bar** (always on top): clock, status ("On your book", "Back in 1:42", "Distracted"), and
-  buttons for start/pause, step away, the calculator and the main window, and a ring that fills as the block runs. Drag it anywhere; set its resting opacity in Settings → Shortcuts (it turns fully visible on hover);
+  buttons for start/pause, step away, camera on/off, the calculator and the main window, and a ring that fills as the block runs. Drag it anywhere; set its resting opacity in Settings → Shortcuts (it turns fully visible on hover);
   double- or right-click opens the main window. Ctrl+Alt+L makes it click-through.
 - **Tray icon**: click opens the main window; right-click for start/pause, step away, the
   calculator, click-through and Quit. LockIn has no taskbar button.
@@ -47,9 +47,14 @@ flowchart LR
   look) feed a small per-user classifier trained by calibration.
 - **Phone and person**: RTMDet-tiny (COCO) runs only when the face is lost or the head has been down
   for a while; two phone sightings in a row ring the phone alarm.
-- **Calibration** (main window → Calibrate, ~15 s): follow a dot that lands on each spot with a soft note (beats keep time on the other steps), read your book, then
+- **Calibration** (main window → Calibrate, ~20 s): the main window steps aside and the timer bar
+  folds into a ball that tours the whole screen, a soft note on each spot; when it rests in the
+  middle, tip your head toward the keyboard and back with your eyes on it. Then read your book and
   look around the room. Redo it when you move the laptop. Uncalibrated, LockIn falls back to head pose.
   Calibrations saved by older versions (different features) are dropped on start; calibrate again.
+- **Eyes first**: the classifier weights iris position, eyelids, eye-look and gaze pitch (head pitch
+  plus the eyes' turn) above head angles and face position, so tipping your head toward the
+  keyboard while still reading the screen stays "screen".
 - **Sites**: the first visit to a blocked site warns; the second visit, or staying past the limit,
   rings the alarm. Ask-sites (YouTube, Reddit) get "for study or distraction?". App names such as
   `discord.exe` work too.
@@ -65,6 +70,7 @@ flowchart LR
 | Ctrl+Alt+P | Start / pause |
 | Ctrl+Alt+B | Step away / I'm back |
 | Ctrl+Alt+C | Calculator |
+| Ctrl+Alt+K | Camera on/off (screen checks keep running) |
 | Ctrl+Alt+O | Main window |
 | Ctrl+Alt+L | Timer bar click-through on/off |
 

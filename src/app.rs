@@ -58,6 +58,9 @@ pub struct CalState {
     /// Usable frames so far (face and both eyes found).
     pub samples: usize,
     pub error: Option<String>,
+    /// Screen step: waiting for the pill to fold into the ball (needs the egui context).
+    pub ball_pending: bool,
+    pub ball: Option<crate::ball::Ball>,
 }
 
 pub struct App {
@@ -268,8 +271,49 @@ impl App {
     }
 
     pub fn calibrate(&mut self, target: CalTarget) {
+        if self.cal.ball.is_some() {
+            return;
+        }
         self.cal = CalState { target: Some(target), ..Default::default() };
-        let _ = self.vision.send(vision::Cmd::Calibrate { camera: self.s.camera_index, target });
+        if target == CalTarget::Screen {
+            // The pill folds into the ball first; sampling starts when it reaches the first spot.
+            self.cal.ball_pending = true;
+        } else {
+            let _ = self.vision.send(vision::Cmd::Calibrate { camera: self.s.camera_index, target });
+        }
+    }
+
+    /// Called by the pill each frame while the screen-calibration ball runs; false once it has
+    /// handed the window back.
+    pub fn ball_frame(&mut self, ui: &mut egui::Ui) -> bool {
+        let ctx = ui.ctx().clone();
+        if std::mem::take(&mut self.cal.ball_pending) {
+            let info = ctx.input(|i| i.viewport().clone());
+            let home = info.outer_rect.map(|r| r.min).unwrap_or(egui::Pos2::ZERO);
+            let monitor = info.monitor_size.unwrap_or(egui::vec2(1920.0, 1080.0));
+            self.cal.ball = Some(crate::ball::Ball::new(home, monitor));
+            ctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(true));
+            self.dash.set_hidden(true);
+            let _ = self.audio.send(audio::Cmd::Note { freq: 0.0, volume: 0.0 });
+        }
+        let Some(ball) = self.cal.ball.as_mut() else { return false };
+        for step in ball.frame(ui, crate::ui::PILL) {
+            match step {
+                crate::ball::Step::StartSampling => {
+                    let _ = self.vision.send(vision::Cmd::Calibrate { camera: self.s.camera_index, target: CalTarget::Screen });
+                }
+                crate::ball::Step::Note(freq) => {
+                    let _ = self.audio.send(audio::Cmd::Note { freq, volume: self.s.volume });
+                }
+                crate::ball::Step::Finished => {
+                    self.cal.ball = None;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(self.click_through));
+                    self.dash.set_hidden(false);
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     pub fn open_dashboard(&mut self) {
@@ -284,6 +328,11 @@ impl App {
             Phase::LongBreak => self.s.long_break_min,
         };
         self.pomo.remaining < mins as f64 * 60.0 - 0.5 || self.pomo.block_added_secs > 0
+    }
+
+    /// Pill button / Ctrl+Alt+K. Persists like the settings switch; screen checks keep running.
+    pub fn toggle_camera(&mut self) {
+        self.s.camera_enabled = !self.s.camera_enabled;
     }
 
     fn set_click_through(&mut self, on: bool, ctx: &egui::Context) {
@@ -324,7 +373,9 @@ impl App {
                     self.calibrate(t);
                 }
             }
-            "cal-cancel" => self.cal = CalState::default(),
+            // The ball must fly home and hand the window back; it ends with the worker's result.
+            "cal-cancel" if self.cal.ball.is_none() && !self.cal.ball_pending => self.cal = CalState::default(),
+            "cal-cancel" => {}
             "cal-reset" => {
                 self.s.calibration = Default::default();
                 let _ = self.vision.send(vision::Cmd::SetCalibration(self.s.calibration.clone()));
@@ -594,6 +645,7 @@ impl App {
                 Hotkey::Brb => self.brb_or_back(),
                 Hotkey::Settings => self.open_dashboard(),
                 Hotkey::ClickThrough => self.set_click_through(!self.click_through, ctx),
+                Hotkey::Camera => self.toggle_camera(),
                 Hotkey::Quit => {
                     self.shutdown();
                     std::process::exit(0);
@@ -637,7 +689,11 @@ impl App {
                     if self.cal.target != Some(target) {
                         continue;
                     }
-                    self.cal = CalState::default();
+                    let mut ball = self.cal.ball.take();
+                    if let Some(b) = ball.as_mut() {
+                        b.sampling_done();
+                    }
+                    self.cal = CalState { ball, ..Default::default() };
                     if let Some(e) = error {
                         self.cal.error = Some(e);
                     } else {
@@ -668,7 +724,11 @@ impl App {
                 }
                 vision::Msg::Error(e) => {
                     if self.cal.target.is_some() {
-                        self.cal = CalState { error: Some(e.clone()), ..Default::default() };
+                        let mut ball = self.cal.ball.take();
+                        if let Some(b) = ball.as_mut() {
+                            b.sampling_done();
+                        }
+                        self.cal = CalState { error: Some(e.clone()), ball, ..Default::default() };
                     }
                     self.cam.error = Some(e);
                 }

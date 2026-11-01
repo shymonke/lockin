@@ -133,7 +133,7 @@ async function previewLoop() {
       }
     } catch (_) { /* ignore */ }
   }
-  setTimeout(previewLoop, 66);
+  setTimeout(previewLoop, 30);
 }
 
 function showEmpty(text) {
@@ -141,19 +141,11 @@ function showEmpty(text) {
   if (text) $("#stage-empty-text").textContent = text;
 }
 
-// Overlay values glide toward the newest measurement for calm motion.
+// The overlay was measured on the very frame shown with it, so the mesh, eyes and face box snap to
+// it; easing them made the drawing trail the picture. Only the gaze arrow glides.
 function lerpOverlay(a, b, k) {
-  if (!a || !b) return b && JSON.parse(JSON.stringify(b));
-  const mix = (x, y) => x + (y - x) * k;
-  const pts = (p, q) => (p && q && p.length === q.length ? p.map((v, i) => [mix(v[0], q[i][0]), mix(v[1], q[i][1])]) : q);
-  const out = JSON.parse(JSON.stringify(b));
-  if (a.face && b.face) out.face = a.face.map((v, i) => mix(v, b.face[i]));
-  if (a.gaze && b.gaze) out.gaze = [mix(a.gaze[0], b.gaze[0]), mix(a.gaze[1], b.gaze[1])];
-  out.landmarks = pts(a.landmarks, b.landmarks);
-  if (a.eyes && b.eyes && a.eyes.length === b.eyes.length) {
-    out.eyes = b.eyes.map((e, i) => ({ ...e, contour: pts(a.eyes[i].contour, e.contour), iris: [mix(a.eyes[i].iris[0], e.iris[0]), mix(a.eyes[i].iris[1], e.iris[1])] }));
-  }
-  return out;
+  if (!a || !b || !a.gaze || !b.gaze) return b;
+  return { ...b, gaze: [a.gaze[0] + (b.gaze[0] - a.gaze[0]) * k, a.gaze[1] + (b.gaze[1] - a.gaze[1]) * k] };
 }
 
 // Redraw only after a new frame and while the overlay glides (~0.5 s), at most 30 fps.
@@ -211,7 +203,7 @@ function paint() {
     g.addColorStop(1, "rgba(20,23,29,.55)");
     ctx.fillStyle = g;
     ctx.fillRect(0, 0, w, h);
-    shown = lerpOverlay(shown, target, reduced ? 1 : 0.3);
+    shown = lerpOverlay(shown, target, reduced ? 1 : 0.5);
     if (shown) drawOverlay(shown, (x, y) => [ox + (1 - x) * dw, oy + y * dh], dw);
   }
   updateChip();
@@ -550,15 +542,13 @@ document.addEventListener("keydown", (e) => {
 /* ------------------------------------------------------------ calibration */
 
 const CAL = {
-  screen: ["Look at your screen", "Follow the dot with your eyes. Keep your head where it normally is."],
+  screen: ["Look at your screen", "This window steps aside and the timer bar turns into a ball. Follow it across the screen with your eyes. When it rests in the middle and breathes, tip your head down toward the keyboard and back up, eyes still on the ball."],
   book: ["Look at your book", "Read a few lines the way you normally study."],
   away: ["Look away", "Look around the room, at the wall, out of the window. Not at the desk."],
 };
 const ORDER = ["screen", "book", "away"];
-const DOTS = [[.5, .45], [.14, .16], [.86, .16], [.86, .82], [.14, .82], [.5, .45]];
-// Rising C-major pentatonic, one note per dot; ticks for the reading/away steps.
-const NOTES = [523.25, 587.33, 659.25, 783.99, 880, 1046.5];
-const BEAT = 1000, MOVE = 420;
+// Ticks for the reading/away steps (the screen step's notes play natively with the ball).
+const BEAT = 1000;
 
 let audio = null;
 function tone(freq, dur = 0.24, gain = 0.12) {
@@ -598,8 +588,6 @@ const cal = {
   },
   close() {
     $("#cal").hidden = true;
-    $("#cal").classList.remove("dotting");
-    $("#cal-dot").hidden = true;
     this.stopBeats();
     if (this.running) send("cal-cancel");
     this.running = false;
@@ -630,21 +618,8 @@ const cal = {
     $("#cal-go").disabled = true;
     send("calibrate", { target: t });
     this.stopBeats();
-    if (t === "screen") {
-      // Card fades out; the dot glides to each spot and pulses on the beat with a note.
-      $("#cal").classList.add("dotting");
-      const dot = $("#cal-dot");
-      dot.hidden = false;
-      DOTS.forEach(([x, y], i) => {
-        this.timers.push(setTimeout(() => {
-          dot.style.transform = `translate3d(${x * innerWidth}px, ${y * innerHeight}px, 0)`;
-        }, i * BEAT));
-        this.timers.push(setTimeout(() => {
-          pulse(dot, "beat");
-          tone(NOTES[i]);
-        }, i * BEAT + (i === 0 ? 0 : MOVE)));
-      });
-    } else {
+    // Screen: the timer bar folds into the ball and tours the whole monitor (native side).
+    if (t !== "screen") {
       // Keep eyes on the book or the room; the ring keeps time.
       for (let i = 0; i < 5; i++) {
         this.timers.push(setTimeout(() => {
@@ -668,8 +643,6 @@ const cal = {
       // This step finished.
       this.running = false;
       this.stopBeats();
-      $("#cal").classList.remove("dotting");
-      $("#cal-dot").hidden = true;
       if (c.error) {
         $("#cal-body").textContent = c.error;
         $("#cal-go").textContent = "Try again";
@@ -695,7 +668,7 @@ $("#cal-cancel").onclick = () => cal.close();
 
 const STEPS = [
   { el: "#stage", title: "This is what LockIn sees", text: "Your eyes and where they point are drawn live. The label shows what LockIn thinks you are doing.", keys: [["O", "Open this window"]] },
-  { el: "#calibrate", title: "Teach it your desk", text: "Calibrate once: follow a dot on the screen, read your book, then look away. Fifteen seconds, and it learns your setup." },
+  { el: "#calibrate", title: "Teach it your desk", text: "Calibrate once: follow a ball across your screen, read your book, then look away. Twenty seconds, and it learns your setup." },
   { el: ".session", title: "Start a focus block", text: "Monitoring only runs while a focus block counts down. The timer bar at the top of your screen shows the same clock.", keys: [["P", "Start or pause"]] },
   { el: "#brb", title: "Stepping away", text: "Getting water? Step away pauses everything without alarms. Come back in time and the timer carries on where it stopped.", keys: [["B", "Step away, or I'm back"]] },
   { el: "#open-settings", title: "Shortcuts that work anywhere", text: "Blocked sites, penalties, sounds and the timer bar's opacity live in settings. Replay this tour from the question mark.", keys: [["C", "Calculator"], ["L", "Timer bar click-through"]] },

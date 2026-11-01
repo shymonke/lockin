@@ -25,10 +25,11 @@ const ICON_ID: u32 = 1;
 /// Resource id of the app icon in `assets/brand/app.rc`.
 const IDI_LOCKIN: u16 = 1;
 
-const MENU: [(Hotkey, PCWSTR); 6] = [
+const MENU: [(Hotkey, PCWSTR); 7] = [
     (Hotkey::Settings, w!("Open LockIn\tCtrl+Alt+O")),
     (Hotkey::StartPause, w!("Start / pause\tCtrl+Alt+P")),
     (Hotkey::Brb, w!("Step away / I'm back\tCtrl+Alt+B")),
+    (Hotkey::Camera, w!("Camera on / off\tCtrl+Alt+K")),
     (Hotkey::Calculator, w!("Calculator\tCtrl+Alt+C")),
     (Hotkey::ClickThrough, w!("Timer bar click-through\tCtrl+Alt+L")),
     (Hotkey::Quit, w!("Quit LockIn")),

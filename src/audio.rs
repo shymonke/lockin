@@ -16,6 +16,8 @@ pub enum Cmd {
     Warn { volume: f32 },
     Alarm { sound: Sound, volume: f32, looping: bool },
     Stop,
+    /// Soft sine note (calibration beats); `volume` 0 just opens the device ahead of time.
+    Note { freq: f32, volume: f32 },
 }
 
 fn tone(out: &mut Vec<f32>, secs: f32, f: impl Fn(f32) -> f32, amp: impl Fn(f32) -> f32) {
@@ -150,6 +152,20 @@ pub fn spawn(rx: Receiver<Cmd>) {
                         looping = None;
                         if let Some(o) = &out {
                             o.player.clear();
+                        }
+                    }
+                    Ok(Cmd::Note { freq, volume }) => {
+                        idle_since = Instant::now();
+                        if out.is_none() {
+                            out = open();
+                        }
+                        if let Some(o) = &out {
+                            if looping.is_none() && volume > 0.0 {
+                                let mut data = Vec::new();
+                                // Like the dashboard's WebAudio tone: quick attack, ~0.24 s decay.
+                                tone(&mut data, 0.27, |_| freq, |x| (x / 0.045).min(1.0) * (1.0 - x).powi(3) * 0.12 * volume);
+                                o.player.append(SamplesBuffer::new(NonZero::new(1).unwrap(), NonZero::new(RATE).unwrap(), data));
+                            }
                         }
                     }
                     Err(RecvTimeoutError::Timeout) => {}

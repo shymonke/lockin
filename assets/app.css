@@ -174,17 +174,8 @@ kbd { font: 500 12px/1 "Segoe UI Variable Text", "Segoe UI", sans-serif; padding
 .cal-ring .prog { stroke: var(--gaze); stroke-dasharray: 326.7; stroke-dashoffset: 326.7; transition: stroke-dashoffset .3s linear; }
 .cal-ring span { position: absolute; inset: 0; display: grid; place-items: center; font: 300 34px/1 "Segoe UI Variable Display", "Segoe UI", sans-serif; font-variant-numeric: tabular-nums; }
 .cal-actions { display: flex; justify-content: center; gap: 10px; }
-/* The dot moves with transform only (compositor, no layout) and pings on each beat. */
-.cal-dot { position: fixed; left: 0; top: 0; width: 18px; height: 18px; margin: -9px 0 0 -9px; border-radius: 50%; background: var(--gaze); box-shadow: 0 0 0 6px color-mix(in srgb, var(--gaze) 20%, transparent); transform: translate3d(50vw, 45vh, 0); transition: transform .42s cubic-bezier(.3, .7, .2, 1); will-change: transform; z-index: 2; }
-.cal-dot::after { content: ""; position: absolute; inset: -6px; border-radius: 50%; border: 2px solid var(--gaze); opacity: 0; }
-.cal-dot.beat::after { animation: ping .6s ease-out; }
-.cal-dot.beat { animation: thump .3s ease-out; }
-@keyframes ping { from { opacity: .8; transform: scale(1); } to { opacity: 0; transform: scale(2.6); } }
-@keyframes thump { 40% { box-shadow: 0 0 0 10px color-mix(in srgb, var(--gaze) 30%, transparent); } }
 .cal-ring.beat svg { animation: ringbeat .35s ease-out; }
 @keyframes ringbeat { 30% { transform: rotate(-90deg) scale(1.05); } }
-.modal.dotting .cal-card { opacity: 0; pointer-events: none; transition: opacity .3s; }
-.modal.dotting { background: #0e1015; }
 
 /* ---------- tour ---------- */
 .tour { position: fixed; inset: 0; z-index: 10; }
