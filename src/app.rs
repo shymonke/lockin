@@ -392,14 +392,9 @@ impl App {
         self.policy_live && self.s.screen_enabled && self.policy.on_blocked_site()
     }
 
-    /// The current phase has been running (or was penalised) rather than freshly set up.
+    /// The current phase has been running rather than freshly set up.
     pub fn pomo_started(&self) -> bool {
-        let mins = match self.pomo.phase {
-            Phase::Focus => self.s.focus_min,
-            Phase::ShortBreak => self.s.short_break_min,
-            Phase::LongBreak => self.s.long_break_min,
-        };
-        self.pomo.remaining < mins as f64 * 60.0 - 0.5 || self.pomo.block_added_secs > 0
+        self.pomo.started
     }
 
     /// Pill button / Ctrl+Alt+K. Persists like the settings switch; screen checks keep running.
@@ -432,6 +427,7 @@ impl App {
                 let _ = self.vision.send(vision::Cmd::SetGazeMode(new.gaze_mode));
             }
             self.s = new;
+            self.pomo.apply_durations(&self.s);
             if click != self.click_through {
                 self.set_click_through(click, ctx);
             }

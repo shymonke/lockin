@@ -22,6 +22,8 @@ pub struct Pomodoro {
     /// Seconds left in the current phase (includes penalty time).
     pub remaining: f64,
     pub running: bool,
+    /// The current phase has run at some point. Until then it follows the duration settings.
+    pub started: bool,
     /// Seconds left of a BRB pause; negative once overdue.
     pub brb: Option<f64>,
     brb_overdue_sent: bool,
@@ -41,6 +43,7 @@ impl Pomodoro {
             phase: Phase::Focus,
             remaining: s.focus_min as f64 * 60.0,
             running: false,
+            started: false,
             brb: None,
             brb_overdue_sent: false,
             distracted_hold: false,
@@ -66,9 +69,18 @@ impl Pomodoro {
 
     pub fn toggle(&mut self) {
         self.running = !self.running;
-        if !self.running {
+        if self.running {
+            self.started = true;
+        } else {
             self.brb = None;
             self.brb_overdue_sent = false;
+        }
+    }
+
+    /// Settings changed: a phase that has not started yet takes its new length.
+    pub fn apply_durations(&mut self, s: &Settings) {
+        if !self.started {
+            self.remaining = self.duration(s, self.phase);
         }
     }
 
@@ -103,6 +115,7 @@ impl Pomodoro {
             Phase::Focus => s.auto_start_focus,
             _ => s.auto_start_breaks,
         };
+        self.started = self.running;
     }
 
     /// Start a BRB pause (only during a running focus block). Returns false when not applicable.
@@ -176,6 +189,25 @@ mod tests {
 
     fn settings() -> Settings {
         Settings { focus_min: 1, short_break_min: 1, long_break_min: 2, long_break_every: 2, ..Default::default() }
+    }
+
+    #[test]
+    fn duration_change_applies_until_the_phase_starts() {
+        let mut s = Settings { auto_start_breaks: false, ..settings() };
+        let mut p = Pomodoro::new(&s);
+        s.focus_min = 50;
+        p.apply_durations(&s);
+        assert_eq!(p.remaining, 3000.0, "unstarted focus takes the new length");
+        p.toggle();
+        p.tick(10.0, &s);
+        p.toggle();
+        s.focus_min = 20;
+        p.apply_durations(&s);
+        assert_eq!(p.remaining, 2990.0, "a started block keeps its time");
+        p.skip(&s);
+        s.short_break_min = 7;
+        p.apply_durations(&s);
+        assert_eq!((p.phase, p.remaining), (Phase::ShortBreak, 420.0), "the next unstarted break follows too");
     }
 
     #[test]

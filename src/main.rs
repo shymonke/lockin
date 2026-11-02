@@ -59,6 +59,18 @@ fn main() {
     if !single_instance() {
         return;
     }
+    // Release builds have no console, so a panic would vanish with the process: keep it in
+    // %APPDATA%\LockIn\crash.log, then let the default hook run.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        let line = format!("[{secs}] v{} {info}\n", env!("CARGO_PKG_VERSION"));
+        let path = config::data_dir().join("crash.log");
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            let _ = std::io::Write::write_all(&mut f, line.as_bytes());
+        }
+        default_hook(info);
+    }));
     // `--demo [marks.json]`: scripted showcase on a throwaway data folder (see app/demo.rs).
     let demo = (args.get(1).map(String::as_str) == Some("--demo")).then(|| args.get(2).map(std::path::PathBuf::from));
     let s = match &demo {

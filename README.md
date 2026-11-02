@@ -5,7 +5,7 @@ for distraction in layers: cheap checks run all the time, heavier ones only when
 Nothing leaves your machine unless you send feedback from the main window. Camera frames are
 analysed in memory and never saved. The screen layer never captures pixels.
 
-[![LockIn demo: click to watch (56 s)](.github/demo-poster.jpg)](https://github.com/shymonke/lockin/releases/download/v0.1.0/lockin-demo.mp4)
+[![LockIn demo (56 s); click for the full-resolution video](.github/demo.webp)](https://github.com/shymonke/lockin/releases/download/v0.1.0/lockin-demo.mp4)
 
 **[Download for Windows](https://github.com/shymonke/lockin/releases/latest)**: unzip and run `lockin.exe`
 (needs the WebView2 runtime, built into Windows 10 and 11).
@@ -165,7 +165,8 @@ Diagnostics (print only, nothing saved):
 
 Data lives in `%APPDATA%\LockIn` (`settings.json`, `stats.json`, `memes\`, `webview\`), outside the
 app folder, so a new build reads the same settings; settings it has never seen take their defaults.
-A file it cannot read is kept as `settings.json.unreadable` before defaults replace it.
+A file it cannot read is kept as `settings.json.unreadable` before defaults replace it. If LockIn
+crashes, the panic message is appended to `crash.log` there.
 
 **Feedback webhook.** The Discord webhook URL is baked in at build time from the
 `LOCKIN_FEEDBACK_WEBHOOK` environment variable or a git-ignored `feedback-webhook.txt` in the repo

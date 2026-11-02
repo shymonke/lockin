@@ -273,21 +273,20 @@ impl App {
         let full = ui.max_rect();
         let rect = Rect::from_min_size(full.min, PILL).shrink(2.0);
 
-        // Place top-centre on first run, then remember where the user drags it (only while the
-        // window is the pill: folded, it is the ball's small square).
+        // Place top-centre on first run (or after "Move the timer bar back to the top"), then
+        // remember where the user drags it. The window keeps the pill's size and place when folded,
+        // so this also moves the folded ball straight away.
         let info = ctx.input(|i| i.viewport().clone());
-        if self.fold.is_open() {
-            match (self.s.overlay_pos, info.monitor_size, info.outer_rect) {
-                (None, Some(m), _) => {
-                    let p = pos2((m.x - PILL.x) / 2.0, 12.0);
-                    ctx.send_viewport_cmd(ViewportCommand::OuterPosition(p));
-                    self.s.overlay_pos = Some([p.x, p.y]);
-                }
-                (Some(saved), _, Some(r)) if (r.min.x - saved[0]).abs() > 1.0 || (r.min.y - saved[1]).abs() > 1.0 => {
-                    self.s.overlay_pos = Some([r.min.x.round(), r.min.y.round()]);
-                }
-                _ => {}
+        match (self.s.overlay_pos, info.monitor_size, info.outer_rect) {
+            (None, Some(m), _) => {
+                let p = pos2((m.x - PILL.x) / 2.0, 12.0);
+                ctx.send_viewport_cmd(ViewportCommand::OuterPosition(p));
+                self.s.overlay_pos = Some([p.x, p.y]);
             }
+            (Some(saved), _, Some(r)) if (r.min.x - saved[0]).abs() > 1.0 || (r.min.y - saved[1]).abs() > 1.0 => {
+                self.s.overlay_pos = Some([r.min.x.round(), r.min.y.round()]);
+            }
+            _ => {}
         }
         let home = self.s.overlay_pos.map(|[x, y]| pos2(x, y)).or(info.outer_rect.map(|r| r.min)).unwrap_or(pos2(0.0, 0.0));
 

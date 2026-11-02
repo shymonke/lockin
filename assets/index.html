@@ -78,8 +78,8 @@
   <section class="task-panel" aria-label="Today's tasks">
     <div class="panel-head"><div><h2>Today’s tasks</h2><p>One task stays active through each focus block.</p></div></div>
     <form class="task-add" id="task-add"><input id="task-title" maxlength="160" placeholder="Add a task…" aria-label="New task"><label>Estimate <input id="task-estimate" type="number" min="1" max="99" value="1"></label><button class="secondary" type="submit">Add</button></form>
-    <div class="task-list" id="task-list"></div>
-    <details class="done-today" id="done-today"><summary>Done today <span id="done-count">0</span></summary><div id="done-list"></div></details>
+    <div class="task-scroll"><div class="task-list" id="task-list"></div>
+    <details class="done-today" id="done-today"><summary>Done today <span id="done-count">0</span></summary><div id="done-list"></div></details></div>
   </section>
   <section class="task-panel ideas-panel" aria-label="Side ideas">
     <div class="panel-head"><div><h2>Side ideas</h2><p>Park it now. Revisit it after studying.</p></div></div>

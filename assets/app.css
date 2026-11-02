@@ -75,7 +75,7 @@ button:disabled { opacity: .45; cursor: default; }
    on the left, sized by `layout()` in app.js; the clock, stats and the two lists share the rest,
    and only the lists scroll inside their cards. */
 main { flex: 1; min-height: 0; display: grid; grid-template-columns: var(--main-w, 60%) minmax(0, 1fr); gap: 18px; padding: 4px 22px 22px; overflow: hidden; }
-.col { display: flex; flex-direction: column; gap: 14px; min-width: 0; min-height: 0; }
+.col { display: flex; flex-direction: column; gap: 14px; min-width: 0; min-height: 0; overflow-y: auto; scrollbar-width: thin; }
 
 /* ---------- camera stage ---------- */
 .stage { position: relative; flex: none; width: 100%; aspect-ratio: var(--cam-ar, 16 / 9); border-radius: var(--radius-l); background: var(--surface); overflow: hidden; }
@@ -110,10 +110,12 @@ main { flex: 1; min-height: 0; display: grid; grid-template-columns: var(--main-
 /* ---------- tasks and history ---------- */
 .task-panel, .history-panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-m); padding: 16px; min-width: 0; }
 /* The lists share the side column's leftover height (tasks get more of it) and scroll inside
-   their card; rows stay packed at the top. */
-.task-panel { flex: 3 1 0; min-height: 170px; display: flex; flex-direction: column; }
-.ideas-panel { flex-grow: 2; min-height: 150px; }
-.task-list, .idea-list { flex: 1 1 auto; min-height: 42px; overflow-y: auto; align-content: start; }
+   their card; rows stay packed at the top. Done today scrolls with the task list. The minimum
+   fits the heading, the add row and one list row. */
+.task-panel { flex: 3 1 0; min-height: 172px; display: flex; flex-direction: column; overflow: hidden; }
+.ideas-panel { flex-grow: 2; }
+.task-scroll, .idea-list { flex: 1 1 auto; min-height: 42px; overflow-y: auto; scrollbar-width: thin; }
+.idea-list { align-content: start; }
 .panel-head, .history-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 18px; }
 .panel-head h2, .history-head h2 { margin: 0; font: 600 15px/1.25 "Segoe UI Variable Display", "Segoe UI", sans-serif; }
 .panel-head p, .history-head p { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
@@ -183,7 +185,7 @@ main { flex: 1; min-height: 0; display: grid; grid-template-columns: var(--main-
 .stat { display: flex; align-items: baseline; gap: 8px; white-space: nowrap; }
 .stat .v { font-weight: 600; font-variant-numeric: tabular-nums; }
 .stat .k { color: var(--muted); }
-.goal { flex: 1 1 80px; height: 4px; border-radius: 2px; background: var(--raised); overflow: hidden; }
+.goal { flex: 1 1 40px; height: 4px; border-radius: 2px; background: var(--raised); overflow: hidden; }
 .goal-fill { height: 100%; width: 0; background: var(--focus); border-radius: 2px; transition: width .8s var(--ease); }
 
 /* ---------- settings sheet ---------- */
