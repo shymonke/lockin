@@ -1,20 +1,21 @@
 //! Screen calibration: the timer pill folds into the gaze-coloured ball, glides across the monitor
 //! (the user follows it with their eyes), rests in the middle for a head nod, then flies home and
-//! unfolds back into the pill. The vision worker samples while the ball travels.
+//! unfolds back into the pill. The vision worker samples while the ball travels; if the camera or
+//! models are still starting, the ball breathes at its first spot until they are ready.
 //!
 //! During the tour the pill window shrinks to a small click-through square that follows the ball.
 //! The ball is drawn in screen coordinates against the window's actual position, so it stays put
 //! on screen even when a move and a resize land a frame apart.
 
+use crate::fold::{morph, MORPH};
 use crate::theme;
-use eframe::egui::{self, pos2, CornerRadius, Pos2, Rect, Stroke, StrokeKind, Ui, Vec2, ViewportCommand};
+use eframe::egui::{self, pos2, Pos2, Rect, Stroke, Ui, Vec2, ViewportCommand};
 use std::time::Instant;
 
 /// Ball spots as fractions of the monitor, same order as the old in-window dot.
 const DOTS: [[f32; 2]; 6] = [[0.5, 0.45], [0.14, 0.16], [0.86, 0.16], [0.86, 0.82], [0.14, 0.82], [0.5, 0.45]];
 /// Rising C-major pentatonic, one note per spot.
 const NOTES: [f32; 6] = [523.25, 587.33, 659.25, 783.99, 880.0, 1046.5];
-const MORPH: f32 = 0.45;
 const FLY: f32 = 0.55;
 const BEAT: f32 = 1.0;
 const MOVE: f32 = 0.42;
@@ -38,6 +39,8 @@ enum Stage {
     Fold,
     /// Ball flying from the pill to the first spot.
     Out,
+    /// At the first spot, breathing until the camera and models are ready.
+    Wait,
     /// Following the spots and the nod (vision sampling runs).
     Tour,
     /// Waiting at the centre for the worker to finish.
@@ -122,8 +125,9 @@ impl Ball {
         ui.max_rect().min + (screen - at)
     }
 
-    /// Advance and draw one frame. `pill` is the pill window size.
-    pub fn frame(&mut self, ui: &mut Ui, pill: Vec2) -> Vec<Step> {
+    /// Advance and draw one frame. `pill` is the pill window size; `ready` whether the vision
+    /// worker has the camera and models up (sampling starts no earlier).
+    pub fn frame(&mut self, ui: &mut Ui, pill: Vec2, ready: bool) -> Vec<Step> {
         let ctx = ui.ctx().clone();
         ctx.request_repaint();
         let t = self.since.elapsed().as_secs_f32();
@@ -139,11 +143,7 @@ impl Ball {
                     _ => 0.0,
                 };
                 let full = Rect::from_min_size(self.local(ui, self.home), pill).shrink(2.0);
-                let ball = Rect::from_center_size(full.center(), Vec2::splat(R * 2.0));
-                let rect = Rect::from_min_max(lerp(full.min, ball.min, k), lerp(full.max, ball.max, k));
-                let fill = theme::SURFACE.lerp_to_gamma(theme::GAZE, k);
-                p.rect_filled(rect, CornerRadius::same(255), fill);
-                p.rect_stroke(rect, CornerRadius::same(255), Stroke::new(1.0, theme::LINE.gamma_multiply(1.0 - k)), StrokeKind::Inside);
+                morph(&p, full, k, theme::SURFACE, theme::GAZE, theme::LINE);
                 match self.stage {
                     Stage::Fold if t >= MORPH => {
                         ctx.send_viewport_cmd(ViewportCommand::InnerSize(Vec2::splat(BALL_WIN)));
@@ -164,14 +164,24 @@ impl Ball {
                 self.show_at(ui, &p, lerp(from, to, glide(t / FLY)), f32::INFINITY, None);
                 if t >= FLY {
                     if self.stage == Stage::Out {
-                        self.last_beat = None;
-                        out.push(Step::StartSampling);
-                        self.go(Stage::Tour);
+                        self.go(Stage::Wait);
                     } else {
                         ctx.send_viewport_cmd(ViewportCommand::InnerSize(pill));
                         ctx.send_viewport_cmd(ViewportCommand::OuterPosition(self.home));
                         self.go(Stage::Unfold);
                     }
+                }
+            }
+            Stage::Wait => {
+                let breathe = (t * std::f32::consts::PI).sin().abs();
+                self.show_at(ui, &p, self.spot(0), f32::INFINITY, Some(breathe));
+                if self.done_sampling {
+                    // Cancelled, or the camera failed, before sampling began.
+                    self.go(Stage::Home);
+                } else if ready {
+                    self.last_beat = None;
+                    out.push(Step::StartSampling);
+                    self.go(Stage::Tour);
                 }
             }
             Stage::Tour | Stage::Hold => {

@@ -3,18 +3,21 @@
 //! calibration ball's blue in the middle (amber looking away, red on a blocked site or alarm).
 //! Hovering it, an alert or a quick add unfolds the pill again.
 //!
-//! While folded the window shrinks to a small square around the ball so the rest of the strip no
-//! longer catches clicks. Shapes are drawn in screen coordinates against the window's actual
-//! position (as in `ball`), so a move and a resize landing a frame apart never shows a jump.
+//! The window keeps the pill's size and place the whole time: resizing it to a small square made
+//! Windows flash the old picture stretched or squeezed for a frame. Folded, it turns click-through
+//! instead, so the empty rest of the strip lets clicks pass, and hovering is read from the OS
+//! cursor.
 
 use crate::theme;
 use eframe::egui::{self, pos2, CornerRadius, Pos2, Rect, Stroke, StrokeKind, Ui, Vec2, ViewportCommand};
 use std::time::{Duration, Instant};
 
-const MORPH: f32 = 0.4;
-/// Ball radius and the folded window's side.
+/// Pill ⇄ ball morph time, shared with the calibration ball so both unfold alike.
+pub const MORPH: f32 = 0.45;
+/// Ball radius.
 pub const R: f32 = 11.0;
-const SIDE: f32 = 64.0;
+/// Folded, a cursor within this distance of the ball's centre unfolds it.
+const HOVER: f32 = 32.0;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Stage {
@@ -72,20 +75,18 @@ impl Fold {
         self.since = Instant::now();
     }
 
-    /// Snap back to the full pill (calibration takes the window over).
-    pub fn reset(&mut self, ctx: &egui::Context, home: Pos2, pill: Vec2) {
-        if self.stage != Stage::Open {
-            ctx.send_viewport_cmd(ViewportCommand::InnerSize(pill));
-            ctx.send_viewport_cmd(ViewportCommand::OuterPosition(home));
-        }
+    /// Snap back to the full pill (calibration takes the window over and restores click-through
+    /// when it hands it back).
+    pub fn reset(&mut self) {
         self.stage = Stage::Open;
         self.touched = Instant::now();
     }
 
     /// Advance one frame; true when the full pill should be drawn. `home` is the pill's saved
-    /// outer position, `hold_open` true while something needs the full pill, and `fold_after` the
-    /// idle delay (`None` = never fold).
-    pub fn frame(&mut self, ui: &mut Ui, home: Pos2, pill: Vec2, look: &Look, hold_open: bool, fold_after: Option<Duration>) -> bool {
+    /// outer position, `hold_open` true while something needs the full pill, `fold_after` the
+    /// idle delay (`None` = never fold), and `click_through` the user's setting, restored on
+    /// unfolding.
+    pub fn frame(&mut self, ui: &mut Ui, home: Pos2, pill: Vec2, look: &Look, hold_open: bool, fold_after: Option<Duration>, click_through: bool) -> bool {
         let ctx = ui.ctx().clone();
         let now = Instant::now();
         let t = self.since.elapsed().as_secs_f32();
@@ -94,7 +95,7 @@ impl Fold {
         // Folded, the hover zone around the ball stays inside the pill's rect: a cursor that
         // unfolds the ball must also hold the pill open, or a cursor resting at the zone's edge
         // would unfold, refold after the delay, and unfold again.
-        let hit = (SIDE / 2.0).min(pill_rect.height() / 2.0);
+        let hit = HOVER.min(pill_rect.height() / 2.0);
         let over = cursor(&ctx).is_some_and(|c| match self.stage {
             Stage::Folded => c.distance(center) <= hit,
             _ => pill_rect.contains(c),
@@ -130,15 +131,10 @@ impl Fold {
                 let t = self.since.elapsed().as_secs_f32();
                 let k = if self.stage == Stage::Folding { ease(t / MORPH) } else { 1.0 - ease(t / MORPH) };
                 let full = Rect::from_min_size(local(ui, home, home), pill).shrink(2.0);
-                let ball = Rect::from_center_size(full.center(), Vec2::splat(R * 2.0));
-                let rect = Rect::from_min_max(full.min.lerp(ball.min, k), full.max.lerp(ball.max, k));
-                let fill = look.fill.lerp_to_gamma(look.tone, k);
-                p.rect_filled(rect, CornerRadius::same(255), fill);
-                p.rect_stroke(rect, CornerRadius::same(255), Stroke::new(1.0, look.edge.gamma_multiply(1.0 - k)), StrokeKind::Inside);
+                morph(&p, full, k, look.fill, look.tone, look.edge);
                 if t >= MORPH {
                     if self.stage == Stage::Folding {
-                        ctx.send_viewport_cmd(ViewportCommand::InnerSize(Vec2::splat(SIDE)));
-                        ctx.send_viewport_cmd(ViewportCommand::OuterPosition(center - Vec2::splat(SIDE / 2.0)));
+                        ctx.send_viewport_cmd(ViewportCommand::MousePassthrough(true));
                         self.go(Stage::Folded);
                     } else {
                         self.go(Stage::Open);
@@ -148,19 +144,27 @@ impl Fold {
             }
             Stage::Folded => {
                 if over || hold_open {
-                    ctx.send_viewport_cmd(ViewportCommand::InnerSize(pill));
-                    ctx.send_viewport_cmd(ViewportCommand::OuterPosition(home));
+                    ctx.send_viewport_cmd(ViewportCommand::MousePassthrough(click_through));
                     self.go(Stage::Unfolding);
                     ctx.request_repaint();
                 }
                 // Cursor polling: the ball gets no mouse events while click-through.
                 ctx.request_repaint_after(Duration::from_millis(150));
-                let c = local(ui, center, center - Vec2::splat(SIDE / 2.0));
+                let c = local(ui, center, home);
                 clock_ball(&p, c, look);
                 false
             }
         }
     }
+}
+
+/// The pill ⇄ ball morph: `k` 0 is the full pill rect, 1 the ball at its centre. The fill blends
+/// from the pill's to the ball's colour and the edge fades out on the way to the ball.
+pub fn morph(p: &egui::Painter, full: Rect, k: f32, fill: egui::Color32, ball: egui::Color32, edge: egui::Color32) {
+    let small = Rect::from_center_size(full.center(), Vec2::splat(R * 2.0));
+    let rect = Rect::from_min_max(full.min.lerp(small.min, k), full.max.lerp(small.max, k));
+    p.rect_filled(rect, CornerRadius::same(255), fill.lerp_to_gamma(ball, k));
+    p.rect_stroke(rect, CornerRadius::same(255), Stroke::new(1.0, edge.gamma_multiply(1.0 - k)), StrokeKind::Inside);
 }
 
 /// Colours and progress for the folded ball (and the fold morph).

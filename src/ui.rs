@@ -264,9 +264,7 @@ impl App {
         let ctx = ui.ctx().clone();
         if self.cal.ball_pending || self.cal.ball.is_some() {
             if !self.fold.is_open() {
-                if let Some([x, y]) = self.s.overlay_pos {
-                    self.fold.reset(&ctx, pos2(x, y), PILL);
-                }
+                self.fold.reset();
             }
             if self.ball_frame(ui) {
                 return;
@@ -321,7 +319,7 @@ impl App {
         };
         let hold_open = self.alert.is_some() || self.pill_adding;
         let fold_after = self.s.pill_fold.then(|| std::time::Duration::from_secs(self.s.pill_fold_secs.max(1) as u64));
-        if !self.fold.frame(ui, home, PILL, &look, hold_open, fold_after) {
+        if !self.fold.frame(ui, home, PILL, &look, hold_open, fold_after, self.click_through) {
             return;
         }
 

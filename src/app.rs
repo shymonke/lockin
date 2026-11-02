@@ -65,6 +65,8 @@ pub struct CalState {
     /// Screen step: waiting for the pill to fold into the ball (needs the egui context).
     pub ball_pending: bool,
     pub ball: Option<crate::ball::Ball>,
+    /// Book/away step: started, but its sampling waits until the camera and models are ready.
+    pub waiting: bool,
 }
 
 pub struct App {
@@ -98,6 +100,12 @@ pub struct App {
     pub calc_min: bool,
     pub calc_spawn: Option<[f32; 2]>,
     pub cal: CalState,
+    /// Calibration steps finished (result or error) since start: the dashboard compares it with
+    /// the value it saw when it started a step, since the window is hidden while the screen step's
+    /// ball runs and never sees that step's progress.
+    cal_done: u64,
+    /// The vision worker has its camera streaming and models loaded (`vision::Msg::Ready`).
+    vision_ready: bool,
     pub click_through: bool,
     pub pill_adding: bool,
     pub pill_add_idea: bool,
@@ -199,6 +207,8 @@ impl App {
             calc_min: false,
             calc_spawn: None,
             cal: CalState::default(),
+            cal_done: 0,
+            vision_ready: false,
             click_through,
             pill_adding: false,
             pill_add_idea: false,
@@ -329,10 +339,13 @@ impl App {
         }
         self.cal = CalState { target: Some(target), ..Default::default() };
         if target == CalTarget::Screen {
-            // The pill folds into the ball first; sampling starts when it reaches the first spot.
+            // The pill folds into the ball first; sampling starts once the ball reaches the first
+            // spot and the camera and models are ready.
             self.cal.ball_pending = true;
         } else {
-            let _ = self.vision.send(vision::Cmd::Calibrate { camera: self.s.camera_index, target });
+            // A step starting with the camera off would otherwise sample while it opens; the
+            // calibration keeps the preview (and so the camera) running, see `tick`.
+            self.cal.waiting = true;
         }
     }
 
@@ -351,7 +364,7 @@ impl App {
             let _ = self.audio.send(audio::Cmd::Note { freq: 0.0, volume: 0.0 });
         }
         let Some(ball) = self.cal.ball.as_mut() else { return false };
-        for step in ball.frame(ui, crate::ui::PILL) {
+        for step in ball.frame(ui, crate::ui::PILL, self.vision_ready) {
             match step {
                 crate::ball::Step::StartSampling => {
                     let _ = self.vision.send(vision::Cmd::Calibrate { camera: self.s.camera_index, target: CalTarget::Screen });
@@ -397,7 +410,10 @@ impl App {
     fn set_click_through(&mut self, on: bool, ctx: &egui::Context) {
         self.click_through = on;
         self.s.overlay_click_through = on;
-        ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::MousePassthrough(on));
+        // Folded (or touring as the calibration ball), the window stays click-through; the setting
+        // applies when the pill is back.
+        let keep = !self.fold.is_open() || self.cal.ball.is_some();
+        ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::MousePassthrough(on || keep));
     }
 
     /// Merge a partial settings object from the dashboard; invalid values are ignored.
@@ -571,6 +587,8 @@ impl App {
                 "progress": self.cal.progress,
                 "samples": self.cal.samples,
                 "error": self.cal.error,
+                "done": self.cal_done,
+                "waiting": self.cal.waiting,
             },
             "today": {
                 "focus_secs": day.focus_secs,
@@ -852,6 +870,7 @@ impl App {
                         b.sampling_done();
                     }
                     self.cal = CalState { ball, ..Default::default() };
+                    self.cal_done += 1;
                     if let Some(e) = error {
                         self.cal.error = Some(e);
                     } else {
@@ -880,6 +899,7 @@ impl App {
                         let _ = self.vision.send(vision::Cmd::SetCalibration(self.s.calibration.clone()));
                     }
                 }
+                vision::Msg::Ready(ready) => self.vision_ready = ready,
                 vision::Msg::Error(e) => {
                     if self.cal.target.is_some() {
                         let mut ball = self.cal.ball.take();
@@ -887,9 +907,16 @@ impl App {
                             b.sampling_done();
                         }
                         self.cal = CalState { error: Some(e.clone()), ball, ..Default::default() };
+                        self.cal_done += 1;
                     }
                     self.cam.error = Some(e);
                 }
+            }
+        }
+        if self.cal.waiting && self.vision_ready {
+            self.cal.waiting = false;
+            if let Some(target) = self.cal.target {
+                let _ = self.vision.send(vision::Cmd::Calibrate { camera: self.s.camera_index, target });
             }
         }
         while let Ok(fg) = self.screen_rx.try_recv() {
@@ -982,11 +1009,12 @@ impl App {
             self.last_stats_save = Instant::now();
         }
 
-        // Dashboard: live camera preview while it is on screen and the camera is on (a calibration
-        // step turns it on for its duration), and a state snapshot a few times a second. Hidden to
-        // the tray it needs neither.
+        // Dashboard: live camera preview while it is on screen and the camera is on, and a state
+        // snapshot a few times a second. Hidden to the tray it needs neither. A calibration step
+        // keeps the camera running even while the screen step hides the window: closing it there
+        // and reopening it for sampling fed the step dark warm-up frames.
         let dash_open = self.dash.is_visible();
-        let want_preview = (dash_open && (self.s.camera_enabled || self.cal.target.is_some())).then_some(self.s.camera_index);
+        let want_preview = ((dash_open && self.s.camera_enabled) || self.cal.target.is_some()).then_some(self.s.camera_index);
         if want_preview != self.preview_cam {
             let _ = self.vision.send(vision::Cmd::Preview(want_preview));
             self.preview_cam = want_preview;

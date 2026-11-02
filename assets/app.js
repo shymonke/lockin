@@ -220,6 +220,8 @@ $("#heatmap").addEventListener("pointerleave", () => { heatTip.hidden = true; })
 const view = $("#view");
 const ctx = view.getContext("2d");
 let frame = null, frameSeq = -1, target = null, shown = null, lastPreview = 0;
+// Check times (ms) of the last ~3 s of preview frames, for the readout's range.
+const checkMs = [];
 
 const LABELS = {
   screen: ["Looking at your screen", "gaze"],
@@ -248,6 +250,8 @@ async function previewLoop() {
           layout();
         }
         target = p.overlay;
+        checkMs.push(p.overlay.l1_ms);
+        if (checkMs.length > 36) checkMs.shift();
         lastPreview = performance.now();
         showEmpty(null);
         wake();
@@ -459,7 +463,10 @@ function updateChip() {
     $("#r-head").textContent = head;
     $("#r-gaze").textContent = o.gaze_deg ? `${Math.round(o.gaze_deg[0])}°  ${Math.round(o.gaze_deg[1])}°` : "–";
     $("#r-eyes").textContent = o.eyes && o.eyes.length ? (o.eyes.length === 2 ? "both found" : "one found") : "not found";
-    $("#r-ms").textContent = `${Math.round(o.l1_ms)} ms`;
+    // This check, and the 5th–95th percentile of the last ~3 s: a wide range means unsteady latency.
+    const sorted = [...checkMs].sort((a, b) => a - b);
+    const at = (q) => Math.round(sorted[Math.round((sorted.length - 1) * q)]);
+    $("#r-ms").textContent = sorted.length >= 6 ? `${Math.round(o.l1_ms)} ms (${at(0.05)}–${at(0.95)})` : `${Math.round(o.l1_ms)} ms`;
   }
   if (chip.dataset.tone !== tone) chip.dataset.tone = tone;
   if ($("#chip-text").textContent !== text) $("#chip-text").textContent = text;
@@ -907,32 +914,39 @@ const cal = {
   go() {
     const t = ORDER[this.step];
     this.running = true;
-    this.sawProgress = false;
+    // The step is over once the app's finished-step count moves past this value. Watching for
+    // progress and then an idle target missed the screen step: the window is hidden while the
+    // ball runs, so it only came back after the step had already ended.
+    this.doneAt = S.cal.done;
     $("#cal-go").disabled = true;
     send("calibrate", { target: t });
     this.stopBeats();
-    // Screen: the timer bar folds into the ball and tours the whole monitor (native side).
-    if (t !== "screen") {
-      // Keep eyes on the book or the room; the ring keeps time.
-      for (let i = 0; i < 5; i++) {
-        this.timers.push(setTimeout(() => {
-          pulse($(".cal-ring"), "beat");
-          tone(i === 4 ? 659.25 : 440, 0.12, 0.08);
-        }, i * BEAT));
-      }
+    this.beating = false;
+  },
+  // Book/away: keep eyes on the book or the room; the ring keeps time from when sampling starts.
+  // (The screen step's notes play natively with the ball.)
+  beats() {
+    this.beating = true;
+    for (let i = 0; i < 5; i++) {
+      this.timers.push(setTimeout(() => {
+        pulse($(".cal-ring"), "beat");
+        tone(i === 4 ? 659.25 : 440, 0.12, 0.08);
+      }, i * BEAT));
     }
   },
   update() {
     if (!S || !this.running) return;
     const c = S.cal;
     const t = ORDER[this.step];
-    if (c.target === t) {
-      this.sawProgress = true;
+    if (c.target === t && c.waiting) {
+      $("#cal-body").textContent = "Starting the camera…";
+    } else if (c.target === t) {
+      if (t !== "screen" && !this.beating) this.beats();
       $("#cal-prog").style.strokeDashoffset = 326.7 * (1 - c.progress);
       $("#cal-count").textContent = Math.max(0, Math.ceil(5 * (1 - c.progress)));
       if (t !== "screen") $("#cal-body").textContent = c.samples ? `${c.samples} clear looks so far. Keep going.` : CAL[t][1];
     }
-    if (this.sawProgress && c.target === null) {
+    if (c.done !== this.doneAt && c.target === null) {
       // This step finished.
       this.running = false;
       this.stopBeats();

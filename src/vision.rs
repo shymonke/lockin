@@ -198,8 +198,8 @@ pub(crate) struct Mesh {
     /// Yaw, pitch (positive = looking down), roll in degrees.
     head: [f32; 3],
     /// Eye-look blendshapes averaged over both eyes: horizontal (out minus in, signed so both eyes
-    /// agree) and vertical (up minus down).
-    look: [f32; 2],
+    /// agree) and vertical (up minus down). `None` when the blendshape model was skipped.
+    look: Option<[f32; 2]>,
 }
 
 impl Mesh {
@@ -378,7 +378,9 @@ impl MeshModel {
         })
     }
 
-    pub(crate) fn detect(&self, f: &Frame, face: &Face) -> TractResult<Option<Mesh>> {
+    /// `look` runs the blendshape model too; "Gaze only" skips it live (its classifier ignores the
+    /// eye-look scores), calibration always runs it so samples suit either mode.
+    pub(crate) fn detect(&self, f: &Frame, face: &Face, look: bool) -> TractResult<Option<Mesh>> {
         let (fw, fh) = (f.width as f32, f.height as f32);
         let (re, le) = (face.landmarks[0], face.landmarks[1]);
         let roll = ((le[1] - re[1]) * fh).atan2((le[0] - re[0]) * fw);
@@ -424,22 +426,26 @@ impl MeshModel {
             return Ok(None);
         };
 
-        // The blendshape model takes the subset in frame pixels.
-        let mut input = Vec::with_capacity(BLENDSHAPE_INPUT.len() * 2);
-        for &i in &BLENDSHAPE_INPUT {
-            input.extend(to_px(pts[i * 3], pts[i * 3 + 1]));
-        }
-        let out = self
-            .blendshapes
-            .run(tvec!(Tensor::from_shape(&[1, BLENDSHAPE_INPUT.len(), 2], &input)?.into()))?;
-        let b = floats(&out[0])?;
-        if b.len() < 52 {
-            return Err(std::io::Error::other("unexpected blendshape output").into());
-        }
-        let look = [
-            ((b[LOOK_OUT[0]] - b[LOOK_IN[0]]) - (b[LOOK_OUT[1]] - b[LOOK_IN[1]])) * 0.5,
-            ((b[LOOK_UP[0]] + b[LOOK_UP[1]]) - (b[LOOK_DOWN[0]] + b[LOOK_DOWN[1]])) * 0.5,
-        ];
+        let look = if look {
+            // The blendshape model takes the subset in frame pixels.
+            let mut input = Vec::with_capacity(BLENDSHAPE_INPUT.len() * 2);
+            for &i in &BLENDSHAPE_INPUT {
+                input.extend(to_px(pts[i * 3], pts[i * 3 + 1]));
+            }
+            let out = self
+                .blendshapes
+                .run(tvec!(Tensor::from_shape(&[1, BLENDSHAPE_INPUT.len(), 2], &input)?.into()))?;
+            let b = floats(&out[0])?;
+            if b.len() < 52 {
+                return Err(std::io::Error::other("unexpected blendshape output").into());
+            }
+            Some([
+                ((b[LOOK_OUT[0]] - b[LOOK_IN[0]]) - (b[LOOK_OUT[1]] - b[LOOK_IN[1]])) * 0.5,
+                ((b[LOOK_UP[0]] + b[LOOK_UP[1]]) - (b[LOOK_DOWN[0]] + b[LOOK_DOWN[1]])) * 0.5,
+            ])
+        } else {
+            None
+        };
         Ok(Some(Mesh {
             points: (0..MESH_POINTS).map(|i| to_frame(pts[i * 3], pts[i * 3 + 1])).collect(),
             eyes: [right, left],
@@ -451,6 +457,8 @@ impl MeshModel {
 
 pub(crate) fn feature_sample(face: &Face, mesh: &Mesh) -> FeatureSample {
     let h = mesh.head;
+    // Skipped blendshapes count as neutral; only "Gaze only" skips them, and it weighs them 0.
+    let look = mesh.look.unwrap_or([0.0; 2]);
     let p = face.pose();
     let [r, l] = &mesh.eyes;
     FeatureSample {
@@ -467,8 +475,8 @@ pub(crate) fn feature_sample(face: &Face, mesh: &Mesh) -> FeatureSample {
             p.area,
             p.center[0],
             p.center[1],
-            mesh.look[0],
-            mesh.look[1],
+            look[0],
+            look[1],
             gaze_pitch(h[1], (r.iris_y + l.iris_y) * 0.5),
         ],
     }
@@ -574,6 +582,9 @@ pub enum Msg {
         samples: Vec<FeatureSample>,
         error: Option<String>,
     },
+    /// The camera delivers frames and the face models have analysed one (`true`), or the camera
+    /// or models were released (`false`). Calibration waits for `true` before sampling.
+    Ready(bool),
     Error(String),
 }
 
@@ -614,6 +625,8 @@ struct Worker {
     /// Face box from the previous frame's mesh: seeds the next crop so YuNet only runs to
     /// (re)acquire the face, as in MediaPipe's tracking mode.
     track: Option<(Face, Instant)>,
+    /// Last readiness sent with `Msg::Ready`.
+    ready: bool,
 }
 
 impl Worker {
@@ -624,6 +637,7 @@ impl Worker {
 
     fn ensure(&mut self, index: u32) -> Result<(), String> {
         if self.cam.as_ref().map(|(i, _)| *i) != Some(index) {
+            self.set_ready(false);
             self.cam = None;
             let cam =
                 Camera::open(index).map_err(|e| format!("Camera unavailable: {}", e.message()))?;
@@ -638,23 +652,25 @@ impl Worker {
         Ok(())
     }
 
-    fn capture(&mut self, run_l2: bool) -> Result<Analysis, String> {
+    /// `calibrating` always runs the blendshape model (see `MeshModel::detect`).
+    fn capture(&mut self, run_l2: bool, calibrating: bool) -> Result<Analysis, String> {
         let (_, cam) = self.cam.as_mut().ok_or("camera closed")?;
         cam.grab(&mut self.frame)
             .map_err(|e| format!("Camera read failed: {}", e.message()))?;
         let t = Instant::now();
         let face_model = self.face.as_ref().unwrap();
         let mesh_model = self.mesh.as_ref().unwrap();
+        let look = calibrating || self.gaze_mode != crate::config::GazeMode::GazeOnly;
         let fresh = self.track.take().filter(|(_, at)| at.elapsed() < TRACK_MAX_AGE).map(|(f, _)| f);
         let mut mesh = match &fresh {
-            Some(seed) => mesh_model.detect(&self.frame, seed).map_err(|e| e.to_string())?,
+            Some(seed) => mesh_model.detect(&self.frame, seed, look).map_err(|e| e.to_string())?,
             None => None,
         };
         // No track, or the face left the tracked crop: detect it again.
         let detected = if mesh.is_none() {
             let d = face_model.detect(&self.frame).map_err(|e| e.to_string())?;
             if let Some(f) = &d {
-                mesh = mesh_model.detect(&self.frame, f).map_err(|e| e.to_string())?;
+                mesh = mesh_model.detect(&self.frame, f, look).map_err(|e| e.to_string())?;
             }
             d
         } else {
@@ -783,7 +799,7 @@ impl Worker {
         let started = Instant::now();
         let mut samples = Vec::with_capacity(count);
         for i in 0..count {
-            let a = self.capture(false)?;
+            let a = self.capture(false, true)?;
             if let Some(s) = a.feature.clone() {
                 samples.push(s);
             }
@@ -796,6 +812,9 @@ impl Worker {
                     progress: (i + 1) as f32 / count as f32,
                     samples: samples.len(),
                 });
+            }
+            if i == 0 {
+                self.set_ready(true);
             }
             std::thread::sleep(
                 (started + STEP * (i as u32 + 1)).saturating_duration_since(Instant::now()),
@@ -820,11 +839,19 @@ impl Worker {
     }
 
     fn release_l1(&mut self) {
+        self.set_ready(false);
         self.cam = None;
         self.face = None;
         self.mesh = None;
         self.track = None;
         self.obj = None;
+    }
+
+    fn set_ready(&mut self, ready: bool) {
+        if self.ready != ready {
+            self.ready = ready;
+            self.send(Msg::Ready(ready));
+        }
     }
 }
 
@@ -878,6 +905,7 @@ pub fn spawn(rx: Receiver<Cmd>, tx: Sender<Msg>, wake: Box<dyn Fn() + Send>, pre
                     bgra: Vec::new(),
                 },
                 track: None,
+                ready: false,
             };
             let mut running: Option<(u32, f64)> = None;
             let mut previewing = false;
@@ -999,9 +1027,10 @@ pub fn spawn(rx: Receiver<Cmd>, tx: Sender<Msg>, wake: Box<dyn Fn() + Send>, pre
                 let index = running.map(|r| r.0).unwrap_or(camera_index);
                 let res = w
                     .ensure(index)
-                    .and_then(|_| w.capture(monitor_due && want_l2));
+                    .and_then(|_| w.capture(monitor_due && want_l2, false));
                 match res {
                     Ok(a) => {
+                        w.set_ready(true);
                         // While the main window previews, every analysed frame also feeds the
                         // policy: the work is already done, and the timer bar then keeps pace
                         // with the preview.
@@ -1022,6 +1051,7 @@ pub fn spawn(rx: Receiver<Cmd>, tx: Sender<Msg>, wake: Box<dyn Fn() + Send>, pre
                     }
                     Err(e) => {
                         w.cam = None;
+                        w.set_ready(false);
                         w.send(Msg::Error(e));
                         next_monitor = Instant::now() + Duration::from_secs(10);
                         next_preview = Instant::now() + Duration::from_secs(2);

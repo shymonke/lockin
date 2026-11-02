@@ -106,33 +106,31 @@ fn single_instance() -> bool {
     unsafe { CreateMutexW(None, true, w!("Local\\LockIn.SingleInstance")).is_ok() && GetLastError() != ERROR_ALREADY_EXISTS }
 }
 
-/// `lockin --diag [image ...]`: run the models on images (or 10 s of live camera when none given)
-/// and print detections, poses and timings.
+/// `lockin --diag [image ...]`: run the models on images (or the live camera when none given)
+/// and print detections, poses and timings. Live, it first prints the camera's warm-up frames,
+/// then times each stage over 60 frames at the preview's ~12 fps.
 fn diag(images: &[String]) {
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
+    let ms = |t: Instant| t.elapsed().as_secs_f64() * 1e3;
     let settings = config::Settings::load();
     let (calibration, gaze_mode) = (settings.calibration, settings.gaze_mode);
     let t = Instant::now();
     let face = vision::FaceModel::load().expect("face model");
-    println!("face model load {:.0} ms", t.elapsed().as_secs_f64() * 1e3);
+    println!("face model load {:.0} ms", ms(t));
     let t = Instant::now();
     let mesh = vision::MeshModel::load().expect("face mesh model");
-    println!("face mesh model load {:.0} ms", t.elapsed().as_secs_f64() * 1e3);
+    println!("face mesh model load {:.0} ms", ms(t));
     let t = Instant::now();
     let obj = vision::ObjectModel::load().expect("object model");
-    println!("object model load {:.0} ms", t.elapsed().as_secs_f64() * 1e3);
+    println!("object model load {:.0} ms", ms(t));
     let report = |f: &camera::Frame| {
         let t = Instant::now();
         let d = face.detect(f).unwrap();
-        let m = d.as_ref().and_then(|d| mesh.detect(f, d).unwrap());
-        let l1 = t.elapsed().as_secs_f64() * 1e3;
-        // Tracking path: the next preview frame seeds the crop from this mesh and skips YuNet.
-        let t = Instant::now();
-        let tracked = m.as_ref().map(|m| mesh.detect(f, &m.face_box(1.0, f.width as f32 / f.height as f32)).unwrap().is_some());
-        let l1_tracked = t.elapsed().as_secs_f64() * 1e3;
+        let m = d.as_ref().and_then(|d| mesh.detect(f, d, true).unwrap());
+        let l1 = ms(t);
         let t = Instant::now();
         let o = obj.detect(f).unwrap();
-        let l2 = t.elapsed().as_secs_f64() * 1e3;
+        let l2 = ms(t);
         match d {
             Some(d) => {
                 let gaze = m.as_ref().map(|m| m.direction());
@@ -143,7 +141,7 @@ fn diag(images: &[String]) {
                     .and_then(|s| policy::classify_gaze_features(s, &calibration, gaze_mode))
                     .unwrap_or((policy::classify_gaze(d.pose(), &calibration), 0.45));
                 println!(
-                    "  face {:.2} rect {:?} head {:?} gaze {:?} look {:?} label {:?} confidence {:.2} | person {:.2} phone {:.2} | L1+mesh {l1:.1} ms, tracked mesh {l1_tracked:.1} ms (kept face: {tracked:?}) L2 {l2:.1} ms",
+                    "  face {:.2} rect {:?} head {:?} gaze {:?} look {:?} label {:?} confidence {:.2} | person {:.2} phone {:.2} | L1+mesh {l1:.1} ms L2 {l2:.1} ms",
                     d.score,
                     d.rect.map(|v| (v * 100.0).round() / 100.0),
                     m.as_ref().map(|m| m.head().map(|v| (v * 10.0).round() / 10.0)),
@@ -164,20 +162,76 @@ fn diag(images: &[String]) {
             ),
         }
     };
+    // Stage timings at the preview cadence: YuNet, mesh alone, mesh plus blendshapes, and the
+    // tracked path the worker takes between detections (mesh seeded from the last frame's mesh).
+    let timings = |grab: &mut dyn FnMut(&mut camera::Frame)| {
+        let mut f = camera::Frame { width: 0, height: 0, bgra: Vec::new() };
+        let mut stages: [(&str, Vec<f64>); 6] = [
+            ("grab (wait for frame)", Vec::new()),
+            ("YuNet face box", Vec::new()),
+            ("mesh only (Gaze only)", Vec::new()),
+            ("mesh + blendshapes", Vec::new()),
+            ("tracked check, Gaze only", Vec::new()),
+            ("tracked check, Gaze, head and position", Vec::new()),
+        ];
+        let mut seed: Option<vision::Face> = None;
+        let started = Instant::now();
+        for i in 0..60u32 {
+            std::thread::sleep((started + Duration::from_secs_f64(i as f64 / 12.0)).saturating_duration_since(Instant::now()));
+            let t = Instant::now();
+            grab(&mut f);
+            stages[0].1.push(ms(t));
+            let t = Instant::now();
+            let Some(d) = face.detect(&f).unwrap() else { continue };
+            stages[1].1.push(ms(t));
+            let t = Instant::now();
+            let _ = mesh.detect(&f, &d, false).unwrap();
+            stages[2].1.push(ms(t));
+            let t = Instant::now();
+            let full = mesh.detect(&f, &d, true).unwrap();
+            stages[3].1.push(ms(t));
+            if let Some(s) = seed {
+                let t = Instant::now();
+                let _ = mesh.detect(&f, &s, false).unwrap();
+                stages[4].1.push(ms(t));
+                let t = Instant::now();
+                let _ = mesh.detect(&f, &s, true).unwrap();
+                stages[5].1.push(ms(t));
+            }
+            seed = full.map(|m| m.face_box(d.score, f.width as f32 / f.height as f32));
+        }
+        println!("{:<40} {:>3} {:>6} {:>6} {:>6} {:>6} {:>6}", "stage (ms)", "n", "min", "median", "p95", "max", "sd");
+        for (name, v) in &mut stages {
+            if v.is_empty() {
+                println!("{name:<40}   0 (no face found)");
+                continue;
+            }
+            v.sort_by(f64::total_cmp);
+            let n = v.len();
+            let mean = v.iter().sum::<f64>() / n as f64;
+            let sd = (v.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n as f64).sqrt();
+            let q = |p: f64| v[((n - 1) as f64 * p).round() as usize];
+            println!("{name:<40} {n:>3} {:>6.1} {:>6.1} {:>6.1} {:>6.1} {:>6.1}", v[0], q(0.5), q(0.95), v[n - 1], sd);
+        }
+    };
     if images.is_empty() {
         let _ = camera::startup();
         println!("cameras: {:?}", camera::list());
+        let opened = Instant::now();
         let mut cam = camera::Camera::open(0).expect("open camera");
         let mut f = camera::Frame { width: 0, height: 0, bgra: Vec::new() };
-        for _ in 0..10 {
-            let t = Instant::now();
+        let luma = |f: &camera::Frame| f.bgra.chunks_exact(4).map(|p| p[1] as u64).sum::<u64>() / (f.width * f.height).max(1) as u64;
+        println!("warm-up (ms since open: mean brightness/255):");
+        let mut line = String::new();
+        while opened.elapsed() < Duration::from_millis(1500) {
             cam.grab(&mut f).expect("grab");
-            let luma = f.bgra.chunks_exact(4).map(|p| p[1] as u64).sum::<u64>() / (f.width * f.height).max(1) as u64;
-            println!("frame {}x{} grab {:.0} ms, mean brightness {luma}/255", f.width, f.height, t.elapsed().as_secs_f64() * 1e3);
-            report(&f);
-            std::thread::sleep(std::time::Duration::from_secs(1));
+            line += &format!(" {:.0}:{}", ms(opened), luma(&f));
         }
+        println!(" {line}");
+        report(&f);
+        timings(&mut |f| cam.grab(f).expect("grab"));
     }
+    let mut last = None;
     for path in images {
         let img = image::open(path).expect("open image").to_rgba8();
         let (w, h) = img.dimensions();
@@ -186,6 +240,16 @@ fn diag(images: &[String]) {
             p.swap(0, 2);
         }
         println!("{path} {w}x{h}");
-        report(&camera::Frame { width: w as usize, height: h as usize, bgra });
+        let f = camera::Frame { width: w as usize, height: h as usize, bgra };
+        report(&f);
+        last = Some(f);
+    }
+    // Images: the same timings on the last image, shown 60 times.
+    if let Some(img) = last {
+        timings(&mut |f| {
+            f.width = img.width;
+            f.height = img.height;
+            f.bgra.clone_from(&img.bgra);
+        });
     }
 }

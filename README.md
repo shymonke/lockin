@@ -81,13 +81,20 @@ flowchart LR
   folds into a ball that tours the whole screen, a soft note on each spot; when it rests in the
   middle, tip your head toward the keyboard and back with your eyes on it. Then read your book and
   look around the room. Redo it when you move the laptop. Uncalibrated, LockIn falls back to head pose.
+  The camera stays on through each step, also while the main window steps aside and with the camera
+  switch off. No step samples before the camera delivers frames and the face models have read one:
+  the ball breathes at its first spot, the book and away steps say "Starting the camera…".
   Calibrations saved by older versions (different features) are dropped on start; calibrate again.
 - **Eyes first**: the classifier weights iris position, eyelids, eye-look, gaze pitch and gaze yaw
   (head angle plus the eyes' turn in the head) above head angles and face size/position, so tipping
   or turning your head, or leaning in, while your eyes stay on the screen stays "screen". Gaze yaw is
   derived from the stored features, so existing calibrations keep working. Settings → Camera →
-  "Decide by: Gaze only" uses nothing but the two gaze angles and eyelid openness (for comparing);
-  the main window's readout shows the live gaze yaw and pitch.
+  "Decide by: Gaze only" uses nothing but the two gaze angles and eyelid openness (for comparing),
+  and skips the blendshape model on live checks (calibration still runs it, so one calibration
+  serves both modes). The mesh itself can't be trimmed: the gaze angles come from its iris and
+  eyelid points, and the network computes all 478 points in one pass. The main window's readout
+  shows the live gaze yaw and pitch, and under Check this frame's time plus the 5th–95th percentile
+  range of the last ~3 s.
 - **Sites**: the first visit to a blocked site warns; the second visit, or staying past the limit,
   rings the alarm. Ask-sites (YouTube, Reddit) get "for study or distraction?". App names such as
   `discord.exe` work too.
@@ -149,8 +156,11 @@ files together.
 
 Diagnostics (print only, nothing saved):
 
-- `lockin --diag` runs 10 s of live camera: face, mesh, head pose, eye look, gaze label, person/phone, timings.
-- `lockin --diag img1.jpg img2.png` runs the same on images.
+- `lockin --diag` opens the live camera, prints its warm-up frames' brightness, one full report (face,
+  mesh, head pose, eye look, gaze label, person/phone), then each stage's time over 60 frames at the
+  preview's 12 fps (min, median, p95, max, spread). The app must be closed: it holds the camera.
+- `lockin --diag img1.jpg img2.png` prints that report for each image, then the stage times on the
+  last one.
 - `lockin --diag-screen` prints what the screen layer sees (app, title, URL) for 15 s.
 
 Data lives in `%APPDATA%\LockIn` (`settings.json`, `stats.json`, `memes\`, `webview\`), outside the
