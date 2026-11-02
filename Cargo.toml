@@ -1,6 +1,6 @@
 [package]
 name = "lockin"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Local, low-RAM study focus tracker overlay"
 license = "MIT"
