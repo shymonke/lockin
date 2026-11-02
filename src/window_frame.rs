@@ -17,11 +17,13 @@ use windows::Win32::Graphics::Dwm::{
     DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DWMNCRP_DISABLED,
 };
 use windows::Win32::System::Threading::GetCurrentThreadId;
+use windows::Win32::Foundation::COLORREF;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallWindowProcW, EnumThreadWindows, GetPropW, GetWindowLongPtrW, GetWindowTextW, SetPropW, SetWindowLongPtrW,
-    SetWindowPos, GWLP_WNDPROC, GWL_STYLE, STYLESTRUCT, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SWP_NOZORDER, WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCPAINT, WM_SETICON, WM_SETTEXT, WM_STYLECHANGING, WNDPROC,
-    WS_CAPTION, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_SYSMENU, WS_VISIBLE,
+    CallWindowProcW, EnumThreadWindows, GetPropW, GetWindowLongPtrW, GetWindowTextW, SetLayeredWindowAttributes, SetPropW,
+    SetWindowLongPtrW, SetWindowPos, ShowWindowAsync, GWLP_WNDPROC, GWL_EXSTYLE, GWL_STYLE, LWA_ALPHA, SC_MINIMIZE,
+    SIZE_MINIMIZED, STYLESTRUCT, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOWNOACTIVATE,
+    WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCPAINT, WM_SETICON, WM_SETTEXT, WM_SIZE, WM_STYLECHANGED, WM_STYLECHANGING,
+    WM_SYSCOMMAND, WNDPROC, WS_CAPTION, WS_EX_LAYERED, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_SYSMENU, WS_VISIBLE,
 };
 
 const OLD_PROC: windows::core::PCWSTR = w!("LockIn.OverlayOldProc");
@@ -41,10 +43,27 @@ unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
         match msg {
             WM_NCCALCSIZE if wp.0 != 0 => LRESULT(0),
             WM_NCPAINT | WM_NCUAHDRAWCAPTION | WM_NCUAHDRAWFRAME => LRESULT(0),
+            // The overlays have no taskbar button to restore them from, and eframe stops running
+            // the app (hotkeys included) while the root window is minimised; Win+M, Win+D or a
+            // stray ShowWindow would leave LockIn invisible and frozen. Bounce straight back.
+            WM_SYSCOMMAND if wp.0 & 0xFFF0 == SC_MINIMIZE as usize => LRESULT(0),
+            WM_SIZE if wp.0 == SIZE_MINIMIZED as usize => {
+                let r = CallWindowProcW(old, hwnd, msg, wp, lp);
+                let _ = ShowWindowAsync(hwnd, SW_SHOWNOACTIVATE);
+                r
+            }
             WM_STYLECHANGING if wp.0 as i32 == GWL_STYLE.0 => {
                 let s = lp.0 as *mut STYLESTRUCT;
                 (*s).styleNew &= !CAPTION_STYLES;
                 CallWindowProcW(old, hwnd, msg, wp, lp)
+            }
+            // Click-through: winit makes the window layered (that is what lets clicks pass) but
+            // never sets its layered alpha, and a layered window without one shows nothing, so
+            // the timer bar and the calibration ball vanished. Give it full opacity.
+            WM_STYLECHANGED if wp.0 as i32 == GWL_EXSTYLE.0 => {
+                let r = CallWindowProcW(old, hwnd, msg, wp, lp);
+                show_layered(hwnd);
+                r
             }
             // lParam -1: DefWindowProc updates the active state but skips the caption repaint.
             WM_NCACTIVATE => CallWindowProcW(old, hwnd, msg, wp, LPARAM(-1)),
@@ -67,6 +86,15 @@ unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
     }
 }
 
+/// Full layered alpha when the window is layered (click-through); see `overlay_proc`.
+unsafe fn show_layered(hwnd: HWND) {
+    unsafe {
+        if GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_LAYERED.0 as isize != 0 {
+            let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA);
+        }
+    }
+}
+
 pub fn remove_overlay_frames() {
     // SAFETY: synchronous enumeration of this UI thread's top-level windows only.
     let _ = unsafe { EnumThreadWindows(GetCurrentThreadId(), Some(remove_frame), LPARAM(0)) };
@@ -77,11 +105,11 @@ unsafe extern "system" fn remove_frame(hwnd: HWND, _: LPARAM) -> BOOL {
     unsafe {
         // winit retains WS_CAPTION even on undecorated top-level windows (it handles
         // WM_NCCALCSIZE itself), so styles cannot distinguish Settings from overlays.
-        // These are the titles of our three undecorated viewport builders.
+        // These are the titles of our undecorated viewport builders.
         let mut title = [0u16; 128];
         let len = GetWindowTextW(hwnd, &mut title) as usize;
         let title = String::from_utf16_lossy(&title[..len]);
-        if !matches!(title.as_str(), "LockIn" | "LockIn alert" | "Normal Calculator") {
+        if !matches!(title.as_str(), "LockIn" | "LockIn alert" | "Normal Calculator" | "LockIn demo backdrop") {
             return BOOL(1);
         }
         // Settings keeps its native decorations. The property is destroyed with the HWND,
@@ -97,6 +125,8 @@ unsafe extern "system" fn remove_frame(hwnd: HWND, _: LPARAM) -> BOOL {
         if set_attribute(hwnd, DWMWA_NCRENDERING_POLICY, &DWMNCRP_DISABLED).is_ok() {
             let _ = SetPropW(hwnd, marker, Some(HANDLE(1usize as *mut _)));
         }
+        // Built click-through (saved setting): already layered before the subclass existed.
+        show_layered(hwnd);
         // Store winit's proc before swapping so overlay_proc can always forward.
         let proc_ptr: unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT = overlay_proc;
         let old = GetWindowLongPtrW(hwnd, GWLP_WNDPROC);

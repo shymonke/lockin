@@ -19,6 +19,8 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+pub mod demo;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Level {
     Info,
@@ -109,6 +111,16 @@ pub struct App {
     first_tick: bool,
     preview_cam: Option<u32>,
     seed: u64,
+    /// Idle fold of the timer bar into the status ball.
+    pub fold: crate::fold::Fold,
+    /// The current alert's card grows out of the ball at this screen point (it was folded).
+    pub alert_from: Option<egui::Pos2>,
+    /// `opened` of the last alert the pill reacted to.
+    pub alert_seen: Option<Instant>,
+    /// Last failure writing the Windows startup entry, for the dashboard.
+    startup_error: Option<String>,
+    /// `lockin --demo`: the scripted showcase in progress.
+    pub demo: Option<demo::Demo>,
 }
 
 impl App {
@@ -122,14 +134,17 @@ impl App {
         let preview: PreviewSlot = Arc::new(Mutex::new(None));
         vision::spawn(vrx, vmsg_tx, Box::new(wake.clone()), preview.clone());
         let _ = vtx.send(vision::Cmd::SetCalibration(s.calibration.clone()));
+        let _ = vtx.send(vision::Cmd::SetGazeMode(s.gaze_mode));
         let (stx, srx) = channel();
         let (smsg_tx, smsg_rx) = channel();
         screen::spawn(srx, smsg_tx, Box::new(wake.clone()));
         let (atx, arx) = channel();
         audio::spawn(arx);
         let (ktx, krx) = channel();
-        hotkeys::spawn(ktx.clone(), Box::new(wake.clone()));
+        hotkeys::spawn(ktx.clone(), Box::new(wake.clone()), &s.keybinds);
         crate::tray::spawn(ktx, Box::new(wake.clone()));
+        // Re-point the startup entry at this exe, so sign-in starts the build that ran last.
+        let startup_error = if s.launch_at_startup { crate::autostart::apply(true).err() } else { None };
         let (dtx, dash_rx) = channel();
         let dash_shared = Arc::new(web::Shared {
             state: Mutex::new("{}".into()),
@@ -197,6 +212,11 @@ impl App {
             first_tick: true,
             preview_cam: None,
             seed,
+            fold: Default::default(),
+            alert_from: None,
+            alert_seen: None,
+            startup_error,
+            demo: None,
         }
     }
 
@@ -322,7 +342,8 @@ impl App {
         let ctx = ui.ctx().clone();
         if std::mem::take(&mut self.cal.ball_pending) {
             let info = ctx.input(|i| i.viewport().clone());
-            let home = info.outer_rect.map(|r| r.min).unwrap_or(egui::Pos2::ZERO);
+            // The saved spot, not the window's: the pill may have been the folded ball a moment ago.
+            let home = self.s.overlay_pos.map(|[x, y]| egui::pos2(x, y)).or(info.outer_rect.map(|r| r.min)).unwrap_or(egui::Pos2::ZERO);
             let monitor = info.monitor_size.unwrap_or(egui::vec2(1920.0, 1080.0));
             self.cal.ball = Some(crate::ball::Ball::new(home, monitor));
             ctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(true));
@@ -351,6 +372,11 @@ impl App {
 
     pub fn open_dashboard(&mut self) {
         self.dash.open(self.dash_shared.clone());
+    }
+
+    /// The foreground is a blocked site while monitoring runs (the ball turns red).
+    pub fn on_blocked_site(&self) -> bool {
+        self.policy_live && self.s.screen_enabled && self.policy.on_blocked_site()
     }
 
     /// The current phase has been running (or was penalised) rather than freshly set up.
@@ -384,12 +410,23 @@ impl App {
         if let Ok(new) = serde_json::from_value::<Settings>(cur) {
             let click = new.overlay_click_through;
             let cam_changed = new.camera_index != self.s.camera_index;
+            let keys_changed = new.keybinds != self.s.keybinds;
+            let startup_changed = new.launch_at_startup != self.s.launch_at_startup;
+            if new.gaze_mode != self.s.gaze_mode {
+                let _ = self.vision.send(vision::Cmd::SetGazeMode(new.gaze_mode));
+            }
             self.s = new;
             if click != self.click_through {
                 self.set_click_through(click, ctx);
             }
             if cam_changed {
                 self.cam.error = None;
+            }
+            if keys_changed {
+                hotkeys::set(&self.s.keybinds);
+            }
+            if startup_changed {
+                self.startup_error = crate::autostart::apply(self.s.launch_at_startup).err();
             }
         }
     }
@@ -451,6 +488,13 @@ impl App {
                 let _ = self.audio.send(audio::Cmd::Stop);
             }
             "preview-alert" => self.preview_alert(ctx),
+            "feedback" => {
+                let ctx = ctx.clone();
+                crate::feedback::send(v["message"].as_str().unwrap_or_default(), v["contact"].as_str().unwrap_or_default(), move || ctx.request_repaint());
+            }
+            "open-github" => {
+                let _ = std::process::Command::new("explorer").arg(env!("CARGO_PKG_REPOSITORY")).spawn();
+            }
             "open-memes" => {
                 let dir = self.media_dir();
                 let _ = std::fs::create_dir_all(&dir);
@@ -467,6 +511,13 @@ impl App {
                 std::process::exit(0);
             }
             "tour-done" => self.s.tour_done = true,
+            // The dashboard is recording a shortcut: release every binding meanwhile.
+            "bind-capture" => hotkeys::pause(v["on"].as_bool().unwrap_or(false)),
+            "dashboard-closed" => hotkeys::pause(false),
+            "keys-default" => {
+                self.s.keybinds = Default::default();
+                hotkeys::set(&self.s.keybinds);
+            }
             "dashboard-error" => self.cam.error = v["error"].as_str().map(|e| format!("Window failed: {e}")),
             _ => {}
         }
@@ -494,6 +545,8 @@ impl App {
         meme_opts.extend(memes::BUILTINS.iter().map(|b| [format!("b:{b}"), b.to_string()]));
         meme_opts.push(["UserFolder".into(), "From my memes folder".into()]);
         meme_opts.push(["Off".into(), "No picture".into()]);
+        let (cap_seq, cap_bind) = hotkeys::captured();
+        let (fb_seq, fb_result) = crate::feedback::status();
         let state = json!({
             "timer": {
                 "phase": match self.pomo.phase { Phase::Focus => "focus", Phase::ShortBreak => "short", Phase::LongBreak => "long" },
@@ -539,7 +592,22 @@ impl App {
             },
             "settings": self.s,
             "tour_done": self.s.tour_done,
-            "hotkeys": hotkeys::ALL.iter().map(|(_, k, d)| [k.to_string(), d.to_string()]).collect::<Vec<_>>(),
+            "hotkeys": hotkeys::ALL.iter().map(|(hk, k, d)| json!({
+                "id": k,
+                "label": d,
+                "keys": self.s.keybinds.get(*hk).map(|b| b.label()),
+                "taken": hotkeys::taken().contains(hk),
+            })).collect::<Vec<_>>(),
+            "bind_captured": { "seq": cap_seq, "bind": cap_bind },
+            "feedback": {
+                "enabled": crate::feedback::WEBHOOK.is_some(),
+                "max": crate::feedback::MAX_LEN,
+                "seq": fb_seq,
+                "sending": fb_seq > 0 && fb_result.is_none(),
+                "error": fb_result.and_then(|r| r.err()),
+            },
+            "startup_error": self.startup_error,
+            "demo_sheet": self.demo.as_ref().and_then(|d| d.sheet),
             "sounds": sounds,
             "memes": meme_opts,
         });
@@ -708,6 +776,7 @@ impl App {
 
     pub fn tick(&mut self, ctx: &egui::Context) {
         let now = self.now();
+        self.demo_tick(ctx);
         if std::mem::take(&mut self.first_tick) && !self.s.tour_done {
             // First run: open the main window, which starts the guided tour.
             self.open_dashboard();
@@ -727,7 +796,12 @@ impl App {
                 }
                 Hotkey::StartPause => self.toggle_timer(),
                 Hotkey::Brb => self.brb_or_back(),
-                Hotkey::Settings => self.open_dashboard(),
+                Hotkey::Settings => {
+                    // Also brings the timer bar back if anything hid it.
+                    ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Minimized(false));
+                    self.open_dashboard();
+                }
                 Hotkey::ClickThrough => self.set_click_through(!self.click_through, ctx),
                 Hotkey::Camera => self.toggle_camera(),
                 Hotkey::Quit => {
@@ -824,8 +898,11 @@ impl App {
             }
             self.fg = fg;
         }
-        for a in actions {
-            self.on_action(a, ctx);
+        // The demo shows its own scripted alerts, whatever the camera and screen make of the room.
+        if self.demo.is_none() {
+            for a in actions {
+                self.on_action(a, ctx);
+            }
         }
 
         // Pomodoro.
@@ -905,9 +982,11 @@ impl App {
             self.last_stats_save = Instant::now();
         }
 
-        // Dashboard: live camera preview while it is open, and a state snapshot a few times a second.
-        let dash_open = self.dash.is_open();
-        let want_preview = dash_open.then_some(self.s.camera_index);
+        // Dashboard: live camera preview while it is on screen and the camera is on (a calibration
+        // step turns it on for its duration), and a state snapshot a few times a second. Hidden to
+        // the tray it needs neither.
+        let dash_open = self.dash.is_visible();
+        let want_preview = (dash_open && (self.s.camera_enabled || self.cal.target.is_some())).then_some(self.s.camera_index);
         if want_preview != self.preview_cam {
             let _ = self.vision.send(vision::Cmd::Preview(want_preview));
             self.preview_cam = want_preview;

@@ -6,7 +6,7 @@
 //! - L2 camera: object detector (person / phone), only on demand (face lost, long head-down).
 //! A long "looking at screen" streak triggers a screen check against the site lists.
 
-use crate::config::{Calibration, FeatureSample, Pose, Settings, GAZE_FEATURES};
+use crate::config::{Calibration, FeatureSample, GazeMode, Pose, Settings, GAZE_FEATURES};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -156,22 +156,53 @@ pub fn classify_gaze(p: Pose, cal: &Calibration) -> Gaze {
     if ds <= db { Gaze::Screen } else { Gaze::Book }
 }
 
+/// Head yaw plus the eyes' horizontal turn in the head (degrees, positive toward the image's
+/// right). `iris_x` is the mean iris position across the eye's corner-to-corner width; an eye is
+/// ~2.5× wider than its eyeball radius, so the offset maps to an angle via asin (as `gaze_pitch`).
+/// Turning the head while the eyes stay on one spot leaves it unchanged.
+pub fn gaze_yaw(head_yaw: f32, iris_x: f32) -> f32 {
+    head_yaw + ((iris_x - 0.5) * 2.5).clamp(-1.0, 1.0).asin().to_degrees()
+}
+
+/// Classifier inputs: the stored `GAZE_FEATURES` plus gaze yaw, derived here so calibrations saved
+/// before it existed keep working.
+const CLASS_FEATURES: usize = GAZE_FEATURES + 1;
+
+fn class_values(v: &[f32]) -> [f32; CLASS_FEATURES] {
+    let mut out = [0.0; CLASS_FEATURES];
+    out[..GAZE_FEATURES].copy_from_slice(&v[..GAZE_FEATURES]);
+    out[GAZE_FEATURES] = gaze_yaw(v[0], (v[3] + v[5]) * 0.5);
+    out
+}
+
 /// Classify a complete eye/head feature vector with a per-user diagonal Gaussian model.
 /// Returns `None` until all three guided targets have enough samples, preserving the legacy
 /// pose-only behaviour for old and partially calibrated settings.
-pub fn classify_gaze_features(sample: &FeatureSample, cal: &Calibration) -> Option<(Gaze, f32)> {
+pub fn classify_gaze_features(sample: &FeatureSample, cal: &Calibration, mode: GazeMode) -> Option<(Gaze, f32)> {
     const MIN_SAMPLES: usize = 5;
     const VAR_FLOOR: f32 = 0.16;
     const OUTLIER_D2: f32 = 16.0;
     // Avoid giving effectively infinite weight to a feature that did not happen to move during calibration.
-    const SCALE_FLOOR: [f32; GAZE_FEATURES] =
-        [5.0, 5.0, 5.0, 0.05, 0.05, 0.05, 0.05, 0.04, 0.04, 0.01, 0.03, 0.03, 0.05, 0.05, 5.0];
-    // Eyes first, head light: head angles and face placement shift when you tip your head toward
-    // the keyboard while still reading the screen, so they only nudge the decision. A large head
-    // turn still stands out as an outlier and reads as Away.
-    const WEIGHT: [f32; GAZE_FEATURES] =
-        [0.35, 0.3, 0.2, 1.0, 1.0, 1.0, 1.0, 0.8, 0.8, 0.25, 0.25, 0.25, 1.0, 1.0, 1.5];
-    let weight_sum: f32 = WEIGHT.iter().sum();
+    const SCALE_FLOOR: [f32; CLASS_FEATURES] =
+        [5.0, 5.0, 5.0, 0.05, 0.05, 0.05, 0.05, 0.04, 0.04, 0.01, 0.03, 0.03, 0.05, 0.05, 5.0, 5.0];
+    // Eyes first, head light: head angles and face placement shift when you tip or turn your head
+    // while still reading the screen, so they only nudge the decision. Direction comes from the
+    // combined gaze angles: turning the head (yaw, iris x, horizontal look, face x all move) while
+    // the eyes stay on the screen keeps gaze yaw put, and a diagonal model cannot see that those
+    // shifts cancel, so the raw horizontal features weigh little. Looking off to the side moves
+    // gaze yaw and reads as Away. Face size and position change with distance to the camera
+    // alone, so they barely count.
+    const COMBINED: [f32; CLASS_FEATURES] =
+        [0.02, 0.3, 0.2, 0.15, 1.0, 0.15, 1.0, 0.8, 0.8, 0.03, 0.03, 0.05, 0.15, 1.0, 1.5, 2.0];
+    // Only where the eyes point (head angle plus the eyes' turn, both axes) and how open the lids
+    // are (they drop toward a book): nothing that moves with head pose or distance by itself.
+    const GAZE_ONLY: [f32; CLASS_FEATURES] =
+        [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 1.5, 1.5];
+    let weights = match mode {
+        GazeMode::Combined => COMBINED,
+        GazeMode::GazeOnly => GAZE_ONLY,
+    };
+    let weight_sum: f32 = weights.iter().sum();
     let classes: [(&[FeatureSample], Gaze); 3] = [
         (&cal.screen_samples, Gaze::Screen),
         (&cal.book_samples, Gaze::Book),
@@ -181,21 +212,22 @@ pub fn classify_gaze_features(sample: &FeatureSample, cal: &Calibration) -> Opti
     if sample.values.len() != GAZE_FEATURES || classes.iter().any(|(s, _)| stale(s)) {
         return None;
     }
+    let classes = classes.map(|(s, g)| (s.iter().map(|x| class_values(&x.values)).collect::<Vec<_>>(), g));
 
     let total = classes.iter().map(|(s, _)| s.len()).sum::<usize>() as f32;
-    let mut mean = [0.0f32; GAZE_FEATURES];
+    let mut mean = [0.0f32; CLASS_FEATURES];
     for (samples, _) in &classes {
-        for s in *samples {
-            for (m, x) in mean.iter_mut().zip(&s.values) {
+        for s in samples {
+            for (m, x) in mean.iter_mut().zip(s) {
                 *m += x / total;
             }
         }
     }
-    let mut scale = [0.0f32; GAZE_FEATURES];
+    let mut scale = [0.0f32; CLASS_FEATURES];
     for (samples, _) in &classes {
-        for s in *samples {
-            for i in 0..GAZE_FEATURES {
-                scale[i] += (s.values[i] - mean[i]).powi(2) / total;
+        for s in samples {
+            for i in 0..CLASS_FEATURES {
+                scale[i] += (s[i] - mean[i]).powi(2) / total;
             }
         }
     }
@@ -203,30 +235,31 @@ pub fn classify_gaze_features(sample: &FeatureSample, cal: &Calibration) -> Opti
         *x = x.sqrt().max(floor);
     }
 
-    let z: [f32; GAZE_FEATURES] = std::array::from_fn(|i| (sample.values[i] - mean[i]) / scale[i]);
+    let values = class_values(&sample.values);
+    let z: [f32; CLASS_FEATURES] = std::array::from_fn(|i| (values[i] - mean[i]) / scale[i]);
     let mut scored = [(Gaze::Away, f32::INFINITY, f32::INFINITY); 3];
     for (ci, (samples, gaze)) in classes.iter().enumerate() {
         let n = samples.len() as f32;
-        let mut cm = [0.0f32; GAZE_FEATURES];
-        for s in *samples {
-            for i in 0..GAZE_FEATURES {
-                cm[i] += ((s.values[i] - mean[i]) / scale[i]) / n;
+        let mut cm = [0.0f32; CLASS_FEATURES];
+        for s in samples {
+            for i in 0..CLASS_FEATURES {
+                cm[i] += ((s[i] - mean[i]) / scale[i]) / n;
             }
         }
-        let mut cv = [0.0f32; GAZE_FEATURES];
-        for s in *samples {
-            for i in 0..GAZE_FEATURES {
-                let x = (s.values[i] - mean[i]) / scale[i];
+        let mut cv = [0.0f32; CLASS_FEATURES];
+        for s in samples {
+            for i in 0..CLASS_FEATURES {
+                let x = (s[i] - mean[i]) / scale[i];
                 cv[i] += (x - cm[i]).powi(2) / n;
             }
         }
         let mut d2 = 0.0;
         let mut nll = 0.0;
-        for i in 0..GAZE_FEATURES {
+        for i in 0..CLASS_FEATURES {
             let v = cv[i].max(VAR_FLOOR);
             let q = (z[i] - cm[i]).powi(2) / v;
-            d2 += WEIGHT[i] * q / weight_sum;
-            nll += WEIGHT[i] * (q + v.ln()) / weight_sum;
+            d2 += weights[i] * q / weight_sum;
+            nll += weights[i] * (q + v.ln()) / weight_sum;
         }
         scored[ci] = (*gaze, d2, nll);
     }
@@ -271,6 +304,11 @@ pub struct Policy {
 }
 
 impl Policy {
+    /// The foreground is a blocked site or app right now (and not waved through for study).
+    pub fn on_blocked_site(&self) -> bool {
+        matches!(&self.site, Some((d, SiteClass::Blocked, _)) if !self.session_allowed.contains(d))
+    }
+
     /// Monitoring (re)starts: forget timers, keep strikes and per-session choices.
     pub fn restart(&mut self, now: f64) {
         let keep = (
@@ -639,14 +677,16 @@ mod tests {
     #[test]
     fn feature_classifier_separates_calibrated_targets() {
         let cal = trained_calibration();
-        for (samples, expected) in [
-            (&cal.screen_samples, Gaze::Screen),
-            (&cal.book_samples, Gaze::Book),
-            (&cal.away_samples, Gaze::Away),
-        ] {
-            let (actual, confidence) = classify_gaze_features(&samples[3], &cal).unwrap();
-            assert_eq!(actual, expected);
-            assert!(confidence > 0.5, "confidence {confidence}");
+        for mode in [GazeMode::Combined, GazeMode::GazeOnly] {
+            for (samples, expected) in [
+                (&cal.screen_samples, Gaze::Screen),
+                (&cal.book_samples, Gaze::Book),
+                (&cal.away_samples, Gaze::Away),
+            ] {
+                let (actual, confidence) = classify_gaze_features(&samples[3], &cal, mode).unwrap();
+                assert_eq!(actual, expected, "{mode:?}");
+                assert!(confidence > 0.5, "{mode:?} confidence {confidence}");
+            }
         }
     }
 
@@ -658,15 +698,41 @@ mod tests {
         let sample = FeatureSample {
             values: vec![1.0, 14.0, 0.5, 0.50, 0.10, 0.50, 0.10, 0.30, 0.30, 0.07, 0.50, 0.56, 0.0, 0.30, -5.5],
         };
-        let (gaze, _) = classify_gaze_features(&sample, &cal).unwrap();
-        assert_eq!(gaze, Gaze::Screen);
+        for mode in [GazeMode::Combined, GazeMode::GazeOnly] {
+            assert_eq!(classify_gaze_features(&sample, &cal, mode).unwrap().0, Gaze::Screen, "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn head_turned_or_moved_with_eyes_on_screen_stays_screen() {
+        let cal = trained_calibration();
+        // Head turned 15°, eyes counter-rotated onto the same spot: iris, horizontal look and face
+        // x all shift with the head (couplings measured on a real calibration), gaze yaw does not.
+        let turn = 15.0f32;
+        let iris = 0.50 - turn.to_radians().sin() / 2.5;
+        let fixating = FeatureSample {
+            values: vec![turn, 0.0, 0.0, iris, 0.35, iris, 0.35, 0.28, 0.28, 0.08, 0.50 + 0.0025 * turn, 0.48, 3.38 * (iris - 0.5), 0.05, -7.0],
+        };
+        // Leaning in: the face fills more of the frame and sits lower in it.
+        let closer = FeatureSample {
+            values: vec![0.0, 0.0, 0.0, 0.50, 0.35, 0.50, 0.35, 0.28, 0.28, 0.14, 0.50, 0.56, 0.0, 0.05, -7.0],
+        };
+        // The same head turn with the eyes following it looks off to the side.
+        let following = FeatureSample {
+            values: vec![turn, 0.0, 0.0, 0.70, 0.40, 0.70, 0.40, 0.27, 0.27, 0.07, 0.50 + 0.0025 * turn, 0.48, 0.45, 0.02, -4.0],
+        };
+        for mode in [GazeMode::Combined, GazeMode::GazeOnly] {
+            assert_eq!(classify_gaze_features(&fixating, &cal, mode).unwrap().0, Gaze::Screen, "{mode:?}");
+            assert_eq!(classify_gaze_features(&closer, &cal, mode).unwrap().0, Gaze::Screen, "{mode:?}");
+            assert_eq!(classify_gaze_features(&following, &cal, mode).unwrap().0, Gaze::Away, "{mode:?}");
+        }
     }
 
     #[test]
     fn feature_classifier_falls_back_to_away_for_outliers() {
         let cal = trained_calibration();
         let sample = FeatureSample { values: vec![200.0; GAZE_FEATURES] };
-        let (gaze, confidence) = classify_gaze_features(&sample, &cal).unwrap();
+        let (gaze, confidence) = classify_gaze_features(&sample, &cal, GazeMode::Combined).unwrap();
         assert_eq!(gaze, Gaze::Away);
         assert!(confidence >= 0.5);
     }
@@ -674,7 +740,7 @@ mod tests {
     #[test]
     fn uncalibrated_feature_classifier_keeps_pose_default() {
         let cal = Calibration::default();
-        assert_eq!(classify_gaze_features(&FeatureSample::default(), &cal), None);
+        assert_eq!(classify_gaze_features(&FeatureSample::default(), &cal, GazeMode::Combined), None);
         assert_eq!(
             classify_gaze(Pose { yaw: 0.0, pitch: 0.62, area: 0.05, ..Default::default() }, &cal),
             Gaze::Screen
@@ -693,6 +759,6 @@ mod tests {
     fn samples_from_an_older_feature_set_are_ignored() {
         let mut cal = trained_calibration();
         cal.screen_samples.iter_mut().for_each(|s| s.values.truncate(12));
-        assert_eq!(classify_gaze_features(&cal.book_samples[0], &cal), None);
+        assert_eq!(classify_gaze_features(&cal.book_samples[0], &cal, GazeMode::Combined), None);
     }
 }

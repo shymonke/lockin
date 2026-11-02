@@ -17,6 +17,16 @@ pub const CAUTION: Color32 = Color32::from_rgb(226, 190, 126);
 pub const ALERT: Color32 = Color32::from_rgb(227, 145, 145);
 pub const BREAK: Color32 = Color32::from_rgb(134, 182, 230);
 
+/// Timer bar background and edge for a theme.
+pub fn pill_colors(t: crate::config::PillTheme) -> (Color32, Color32) {
+    use crate::config::PillTheme::*;
+    match t {
+        Slate => (Color32::from_rgba_unmultiplied(27, 31, 39, 248), LINE),
+        Midnight => (Color32::from_rgba_unmultiplied(8, 9, 12, 252), Color32::from_rgb(74, 82, 99)),
+        Glass => (Color32::from_rgba_unmultiplied(27, 31, 39, 140), Color32::from_rgba_unmultiplied(255, 255, 255, 46)),
+    }
+}
+
 fn family(name: &str) -> FontFamily {
     FontFamily::Name(name.into())
 }

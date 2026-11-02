@@ -64,7 +64,9 @@ function render() {
   const back = t.brb !== null || S.alarm;
   setButton(brb, back ? "back" : "coffee", back ? "I'm back" : "Step away");
   brb.disabled = !(t.brb !== null || S.alarm || (t.running && focus));
-  brb.title = t.brb !== null || S.alarm ? "Ctrl+Alt+B" : `Pause for ${Math.round(S.settings.brb_secs / 60 * 10) / 10} min without alarms (Ctrl+Alt+B)`;
+  const brbKeys = (S.hotkeys.find((h) => h.id === "brb") || {}).keys;
+  const pause = `Pause for ${Math.round(S.settings.brb_secs / 60 * 10) / 10} min without alarms`;
+  brb.title = t.brb !== null || S.alarm ? brbKeys || "" : brbKeys ? `${pause} (${brbKeys})` : pause;
 
   const d = S.today;
   $("#t-focus").textContent = mins(d.focus_secs);
@@ -84,6 +86,14 @@ function render() {
   renderTasks();
   cal.update();
   if (sheet.open) sheet.refresh();
+  recorder.poll();
+  feedback.update();
+  // `lockin --demo` opens and closes the settings sheet on its timeline.
+  if ((S.demo_sheet ?? null) !== render.demoSheet) {
+    render.demoSheet = S.demo_sheet ?? null;
+    if (render.demoSheet) sheet.show(render.demoSheet);
+    else if (sheet.open) sheet.hide();
+  }
   if (!drawing) updateChip();
 }
 
@@ -147,7 +157,7 @@ function renderHeatmap(data) {
     if (date <= today) total += n;
     const col = Math.floor(i / 7);
     if (date.getMonth() !== lastMonth && date.getDate() <= 7) {
-      months.push(`<span style="left:${col * 14}px">${date.toLocaleString(undefined, { month: "short" })}</span>`);
+      months.push(`<span style="left:calc(${col} * (var(--cell, 11px) + 3px))">${date.toLocaleString(undefined, { month: "short" })}</span>`);
       lastMonth = date.getMonth();
     }
     const future = date > today;
@@ -233,12 +243,18 @@ async function previewLoop() {
         frame = next;
         if (old) old.close();
         frameSeq = p.seq;
+        if (Math.abs(next.width / next.height - camAspect) > 0.01) {
+          camAspect = next.width / next.height;
+          layout();
+        }
         target = p.overlay;
         lastPreview = performance.now();
         showEmpty(null);
         wake();
       } else if (p.seq === null) {
-        showEmpty(S && S.cam.error ? S.cam.error : "Starting your camera…");
+        if (frame) { frame.close(); frame = null; frameSeq = -1; target = null; wake(); }
+        const off = S && !S.settings.camera_enabled && !(S.cal && S.cal.target);
+        showEmpty(off ? "The camera is off" : S && S.cam.error ? S.cam.error : "Starting your camera…");
       }
     } catch (_) { /* ignore */ }
   }
@@ -267,6 +283,49 @@ function wake() {
   }
 }
 addEventListener("resize", wake);
+
+// Camera column: the preview keeps the camera's own aspect ratio (uncropped) and is as large as
+// the window allows with the history card under it, leaving the side column at least SIDE_MIN.
+// The heatmap's cells grow with the column so the year spans the card. Cell size and column width
+// depend on each other through the card's height, so a few passes settle them.
+const SIDE_MIN = 460;
+const narrow = matchMedia("(max-width: 860px)");
+let camAspect = 16 / 9;
+function layout() {
+  const main = $("main");
+  const cs = getComputedStyle(main);
+  const w = main.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+  const h = main.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
+  const history = $(".history-panel");
+  const gap = parseFloat(getComputedStyle($(".col-main")).rowGap) || 0;
+  const setCell = (colW) => {
+    const hs = getComputedStyle(history);
+    const chrome = parseFloat(hs.paddingLeft) + parseFloat(hs.paddingRight) + parseFloat(hs.borderLeftWidth) + parseFloat(hs.borderRightWidth);
+    const grid = colW - chrome - $(".heat-labels").offsetWidth - 8;
+    const cell = Math.max(5, Math.min(20, Math.floor(((grid + 3) / 53 - 3) * 4) / 4));
+    main.style.setProperty("--cell", `${cell}px`);
+  };
+  main.style.setProperty("--cam-ar", String(camAspect));
+  if (narrow.matches) {
+    setCell(w);
+  } else {
+    let width = w * 0.6;
+    for (let pass = 0; pass < 3; pass++) {
+      setCell(width);
+      const stageH = Math.max(120, h - history.offsetHeight - gap);
+      width = Math.max(240, Math.min(stageH * camAspect, w - parseFloat(cs.columnGap) - SIDE_MIN));
+    }
+    width = Math.floor(width);
+    setCell(width);
+    // Cells now fixed: if the card grew, narrow the camera so the column still fits.
+    width = Math.floor(Math.min(width, Math.max(120, h - history.offsetHeight - gap) * camAspect));
+    main.style.setProperty("--main-w", `${width}px`);
+  }
+  // The newest weeks sit at the right end of the heatmap.
+  const heat = $(".heat-wrap");
+  heat.scrollLeft = heat.scrollWidth;
+}
+new ResizeObserver(layout).observe($("main"));
 
 function draw(now) {
   if (now - lastDraw < 32) {
@@ -398,6 +457,7 @@ function updateChip() {
     if (o.label && o.label !== "absent" && o.confidence > 0) conf = `${Math.round(o.confidence * 100)}%`;
     const head = o.head ? `${Math.round(o.head[0])}°  ${Math.round(o.head[1])}°` : "–";
     $("#r-head").textContent = head;
+    $("#r-gaze").textContent = o.gaze_deg ? `${Math.round(o.gaze_deg[0])}°  ${Math.round(o.gaze_deg[1])}°` : "–";
     $("#r-eyes").textContent = o.eyes && o.eyes.length ? (o.eyes.length === 2 ? "both found" : "one found") : "not found";
     $("#r-ms").textContent = `${Math.round(o.l1_ms)} ms`;
   }
@@ -432,6 +492,7 @@ const sheet = {
     this.build();
   },
   hide() {
+    recorder.end();
     this.open = false;
     $("#scrim").classList.remove("show");
     $("#sheet").classList.remove("open");
@@ -439,6 +500,7 @@ const sheet = {
     setTimeout(() => { if (!this.open) $("#scrim").hidden = true; }, 300);
   },
   build() {
+    recorder.end();
     document.querySelectorAll("#sheet-nav button").forEach((b) => b.classList.toggle("on", b.dataset.sec === this.sec));
     $("#sheet-body").innerHTML = SECTIONS[this.sec]();
     $("#sheet-body").scrollTop = 0;
@@ -464,6 +526,12 @@ const sheet = {
       el.innerHTML = items.length
         ? items.map((d) => `<span class="tag">${esc(d)}<button data-rm="${esc(d)}" aria-label="Remove ${esc(d)}">${ICON_X}</button></span>`).join("")
         : `<span class="help" style="color:var(--muted)">Nothing here yet.</span>`;
+    });
+    document.querySelectorAll("#sheet-body [data-bind]").forEach((el) => {
+      if (el === recorder.btn || (el === recorder.held && performance.now() < recorder.heldUntil)) return;
+      const h = S.hotkeys.find((x) => x.id === el.dataset.bind);
+      const text = (h && h.keys) || "Not set";
+      if (el.textContent !== text) el.textContent = text;
     });
     const cs = $("#cal-summary");
     if (cs) {
@@ -497,7 +565,7 @@ const SECTIONS = {
       ${sw("auto_start_focus", "Start the next focus block on its own")}
       ${num("daily_goal_min", "Daily goal", 10, 900, "min")}
     </div>
-    <div class="group"><h4>Stepping away</h4><p class="help">Ctrl+Alt+B or “Step away” pauses everything without alarms. Come back in time or the alarm rings.</p>
+    <div class="group"><h4>Stepping away</h4><p class="help">${keyHint("brb", "", " or ")}“Step away” pauses everything without alarms. Come back in time or the alarm rings.</p>
       ${num("brb_secs", "Time allowed", 15, 1800, "sec")}
       ${sw("brb_auto_resume", "Resume when the camera sees me working again")}
     </div>
@@ -513,6 +581,8 @@ const SECTIONS = {
         <select class="field" id="f-mode" data-k="camera_mode"><option value="Interval">Every few seconds (saves power)</option><option value="Always">Continuously, 2 per second</option></select></div>
       ${num("check_interval_secs", "Check every", 1, 30, "sec")}
       ${sw("hide_camera_image", "Hide the camera picture", "Only the tracking lines show here, handy when sharing your screen")}
+      <div class="row"><label for="f-gaze_mode">Decide by<small>For testing: “Gaze only” ignores head pose and distance and uses just where your eyes point</small></label>
+        <select class="field" id="f-gaze_mode" data-k="gaze_mode"><option value="Combined">Gaze, head and position</option><option value="GazeOnly">Gaze only</option></select></div>
       <p class="help">Frames stay in memory and are never saved. The camera turns off during breaks.</p>
     </div>
     <div class="group"><h4>When to alert</h4>
@@ -561,16 +631,39 @@ const SECTIONS = {
     </div>
     <div class="group">${sw("brainrot", "Brainrot wording", "Alerts get a lot less polite")}</div>`,
   keys: () => `
-    <div class="group"><h4>Shortcuts</h4><p class="help">Work anywhere in Windows.</p>
-      <div class="keys">${S.hotkeys.map(([k, d]) => `<kbd>Ctrl + Alt + ${esc(k)}</kbd><span>${esc(d)}</span>`).join("")}</div>
+    <div class="group"><h4>Shortcuts</h4><p class="help">They work anywhere in Windows. Click one, then press the keys, scroll the wheel, or press the middle or a side button (Mouse 4 / 5). Esc cancels, Backspace removes it.</p>
+      ${S.hotkeys.map((h) => `<div class="row"><label>${esc(h.label)}${h.taken ? `<small class="taken">Another app already uses this shortcut</small>` : ""}</label><button class="secondary bind" data-bind="${h.id}">${esc(h.keys || "Not set")}</button></div>`).join("")}
+      <p class="help" style="margin-top:10px">A bare wheel or side button stops doing its usual job everywhere while bound; hold Ctrl or Alt with it to keep both.</p>
+      <div class="btns"><button class="secondary" data-act="keys-default">Restore the defaults</button></div>
     </div>
-    <div class="group"><h4>Timer bar</h4>
-      <div class="row"><label for="f-pill_opacity">Opacity<small>It turns fully visible while your mouse is over it</small></label><input id="f-pill_opacity" data-k="pill_opacity" type="range" min="0.3" max="1" step="0.02"></div>
-      ${sw("overlay_click_through", "Clicks pass through the timer bar", "Turn off again with Ctrl+Alt+L")}
-      <div class="btns"><button class="secondary" data-act="pill-home">Move the timer bar back to the top</button><button class="secondary" data-act="calc">Open the calculator</button></div>
+    <div class="group"><h4>Windows</h4>
+      ${sw("launch_at_startup", "Start LockIn when I sign in", "Starts the copy of LockIn you opened last, so a newer build takes over by itself")}
+      ${S.startup_error ? `<p class="help taken">${esc(S.startup_error)}</p>` : ""}
+      <p class="help">LockIn stays in the notification area, not on the taskbar. Minimising this window tucks it away there.</p>
     </div>
     <div class="group"><div class="btns"><button class="secondary" data-act="quit">Quit LockIn</button></div></div>`,
+  pill: () => `
+    <div class="group"><h4>Look</h4>
+      <div class="row"><label for="f-pill_theme">Theme</label>
+        <select class="field" id="f-pill_theme" data-k="pill_theme"><option value="Slate">Slate</option><option value="Midnight">Midnight</option><option value="Glass">Glass</option></select></div>
+      <div class="row"><label for="f-pill_opacity">Opacity<small>It turns fully visible while your mouse is over it</small></label><input id="f-pill_opacity" data-k="pill_opacity" type="range" min="0.3" max="1" step="0.02"></div>
+    </div>
+    <div class="group"><h4>Ball</h4><p class="help">When idle the bar folds into a ball. Blue normally, amber while you look away, red on a blocked site or alarm.</p>
+      ${sw("pill_fold", "Fold into a ball when idle", "It opens again under the mouse or for an alert")}
+      ${sw("pill_clock", "Clock around the ball", "A ring that fills as the block runs, with a hand at its end")}
+      ${num("pill_fold_secs", "Fold after", 2, 120, "sec")}
+    </div>
+    <div class="group"><h4>Behaviour</h4>
+      ${sw("overlay_click_through", "Clicks pass through the timer bar", `${keyHint("click_through", "Turn off with ", ". ")}Always off again when LockIn starts`)}
+      <div class="btns"><button class="secondary" data-act="pill-home">Move the timer bar back to the top</button><button class="secondary" data-act="calc">Open the calculator</button></div>
+    </div>`,
 };
+
+/** The action's shortcut wrapped in `before`/`after` for help text; empty when it has none. */
+function keyHint(id, before = "", after = "") {
+  const h = S && S.hotkeys.find((x) => x.id === id);
+  return h && h.keys ? `${before}${esc(h.keys)}${after}` : "";
+}
 
 function parseControl(el) {
   if (el.type === "checkbox") return el.checked;
@@ -606,6 +699,8 @@ $("#sheet-body").addEventListener("click", (e) => {
     sheet.refresh();
     return;
   }
+  const bind = e.target.closest("[data-bind]");
+  if (bind) return recorder.start(bind);
   const add = e.target.closest("[data-addbtn]");
   if (add) return addItem(add.dataset.addbtn);
   const act = e.target.closest("[data-act]");
@@ -633,6 +728,94 @@ function addItem(k) {
   sheet.refresh();
 }
 
+/* ------------------------------------------------------------ shortcut recorder */
+
+// Matches hotkeys.rs: wheel pseudo codes. Middle and side buttons are captured by LockIn's mouse
+// hook (the page never saw Mouse 4) and arrive through the state as `bind_captured`.
+const WHEEL_UP = 0x10000, WHEEL_DOWN = 0x10001;
+const MODIFIER_CODES = new Set([16, 17, 18, 91, 92, 93]);
+const mods = (e) => ({ ctrl: e.ctrlKey, alt: e.altKey, shift: e.shiftKey, win: e.metaKey });
+const sameBind = (a, b) => a && b && a.key === b.key && !!a.ctrl === !!b.ctrl && !!a.alt === !!b.alt && !!a.shift === !!b.shift && !!a.win === !!b.win;
+
+const recorder = {
+  id: null,
+  btn: null,
+  // Just-saved button keeps its text until the app's new label arrives.
+  held: null,
+  heldUntil: 0,
+  start(btn) {
+    this.end();
+    this.id = btn.dataset.bind;
+    this.btn = btn;
+    // Only buttons pressed from now on count.
+    this.seq = S.bind_captured.seq;
+    btn.classList.add("recording");
+    btn.textContent = "Press a shortcut…";
+    // LockIn lets go of every shortcut meanwhile, so the one being pressed reaches this page.
+    send("bind-capture", { on: true });
+  },
+  // Called on every state poll.
+  poll() {
+    const c = S.bind_captured;
+    if (this.id && c.seq !== this.seq && c.bind) this.commit(c.bind);
+  },
+  end() {
+    if (!this.id) return;
+    this.btn.classList.remove("recording");
+    this.id = this.btn = null;
+    send("bind-capture", { on: false });
+    sheet.refresh();
+  },
+  commit(binding) {
+    const binds = { ...S.settings.keybinds };
+    // One shortcut, one action: take it away from whichever action had it.
+    if (binding) for (const k of Object.keys(binds)) if (k !== this.id && sameBind(binds[k], binding)) binds[k] = null;
+    binds[this.id] = binding;
+    S.settings.keybinds = binds;
+    send("settings", { patch: { keybinds: binds } });
+    this.btn.textContent = binding ? "Saved" : "Not set";
+    this.held = this.btn;
+    this.heldUntil = performance.now() + 700;
+    this.end();
+  },
+};
+
+document.addEventListener("keydown", (e) => {
+  if (!recorder.id) return;
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  const m = mods(e);
+  const anyMod = m.ctrl || m.alt || m.shift || m.win;
+  if (MODIFIER_CODES.has(e.keyCode)) {
+    recorder.btn.textContent = `${[m.ctrl && "Ctrl", m.alt && "Alt", m.shift && "Shift", m.win && "Win"].filter(Boolean).join("+")}+…`;
+    return;
+  }
+  if (e.key === "Escape" && !anyMod) return recorder.end();
+  if ((e.key === "Backspace" || e.key === "Delete") && !anyMod) return recorder.commit(null);
+  // A bare key would stop typing it anywhere; function keys are the exception.
+  const fkey = e.keyCode >= 112 && e.keyCode <= 135;
+  if (!fkey && !(m.ctrl || m.alt || m.win)) {
+    recorder.btn.textContent = "Hold Ctrl, Alt or Win with it";
+    return;
+  }
+  recorder.commit({ ...m, key: e.keyCode });
+}, true);
+
+document.addEventListener("wheel", (e) => {
+  if (!recorder.id) return;
+  e.preventDefault();
+  recorder.commit({ ...mods(e), key: e.deltaY > 0 ? WHEEL_DOWN : WHEEL_UP });
+}, { capture: true, passive: false });
+
+document.addEventListener("mousedown", (e) => {
+  if (recorder.id && e.button === 0 && e.target !== recorder.btn) recorder.end();
+}, true);
+
+// Side buttons would otherwise navigate the page back or forward.
+for (const type of ["mouseup", "auxclick"]) {
+  document.addEventListener(type, (e) => { if (e.button === 3 || e.button === 4) e.preventDefault(); }, true);
+}
+
 $("#open-settings").onclick = () => sheet.show();
 $("#close-settings").onclick = () => sheet.hide();
 $("#scrim").onclick = () => sheet.hide();
@@ -644,6 +827,7 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
     if (tour.active) tour.end();
     else if (!$("#cal").hidden) cal.close();
+    else if (!$("#feedback").hidden) feedback.close();
     else if (sheet.open) sheet.hide();
   }
 });
@@ -773,14 +957,62 @@ $("#calibrate").onclick = () => cal.open();
 $("#cal-go").onclick = () => cal.go();
 $("#cal-cancel").onclick = () => cal.close();
 
+/* ------------------------------------------------------------ feedback */
+
+const feedback = {
+  // State `feedback.seq` at the moment Send was pressed; the next one carries our result.
+  waitFrom: null,
+  open() {
+    $("#feedback-error").hidden = true;
+    $("#feedback").hidden = false;
+    $("#feedback-message").focus();
+  },
+  close() {
+    $("#feedback").hidden = true;
+    this.waitFrom = null;
+  },
+  // Called on every state poll.
+  update() {
+    const f = S.feedback;
+    $("#open-feedback").hidden = !f.enabled;
+    $("#feedback-message").maxLength = f.max;
+    if (this.waitFrom !== null && f.seq !== this.waitFrom && !f.sending) {
+      this.waitFrom = null;
+      if (f.error) {
+        $("#feedback-error").textContent = f.error;
+        $("#feedback-error").hidden = false;
+      } else {
+        $("#feedback-message").value = "";
+        this.close();
+        toast("Thanks, your feedback was sent");
+      }
+    }
+    const busy = this.waitFrom !== null;
+    $("#feedback-send").disabled = busy;
+    $("#feedback-send").textContent = busy ? "Sending…" : "Send";
+  },
+};
+$("#open-feedback").onclick = () => feedback.open();
+$("#feedback-cancel").onclick = () => feedback.close();
+$("#feedback-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const message = $("#feedback-message").value.trim();
+  if (!message || feedback.waitFrom !== null) return;
+  $("#feedback-error").hidden = true;
+  feedback.waitFrom = S.feedback.seq;
+  send("feedback", { message, contact: $("#feedback-contact").value.trim() });
+  feedback.update();
+});
+$("#open-github").onclick = () => send("open-github");
+
 /* ------------------------------------------------------------ tour */
 
 const STEPS = [
-  { el: "#stage", title: "This is what LockIn sees", text: "Your eyes and where they point are drawn live. The label shows what LockIn thinks you are doing.", keys: [["O", "Open this window"]] },
+  { el: "#stage", title: "This is what LockIn sees", text: "Your eyes and where they point are drawn live. The label shows what LockIn thinks you are doing.", keys: [["open", "Open this window"]] },
   { el: "#calibrate", title: "Teach it your desk", text: "Calibrate once: follow a ball across your screen, read your book, then look away. Twenty seconds, and it learns your setup." },
-  { el: ".session", title: "Start a focus block", text: "Monitoring only runs while a focus block counts down. The timer bar at the top of your screen shows the same clock.", keys: [["P", "Start or pause"]] },
-  { el: "#brb", title: "Stepping away", text: "Getting water? Step away pauses everything without alarms. Come back in time and the timer carries on where it stopped.", keys: [["B", "Step away, or I'm back"]] },
-  { el: "#open-settings", title: "Shortcuts that work anywhere", text: "Blocked sites, penalties, sounds and the timer bar's opacity live in settings. Replay this tour from the question mark.", keys: [["C", "Calculator"], ["L", "Timer bar click-through"]] },
+  { el: ".session", title: "Start a focus block", text: "Monitoring only runs while a focus block counts down. The timer bar at the top of your screen shows the same clock.", keys: [["start_pause", "Start or pause"]] },
+  { el: "#brb", title: "Stepping away", text: "Getting water? Step away pauses everything without alarms. Come back in time and the timer carries on where it stopped.", keys: [["brb", "Step away, or I'm back"]] },
+  { el: "#open-settings", title: "Shortcuts that work anywhere", text: "Blocked sites, penalties, sounds, the timer bar and your own shortcuts live in settings. Replay this tour from the question mark.", keys: [["calculator", "Calculator"], ["click_through", "Timer bar click-through"]] },
 ];
 
 const tour = {
@@ -807,7 +1039,11 @@ const tour = {
     $("#tour-step").textContent = `${this.i + 1} of ${STEPS.length}`;
     $("#tour-title").textContent = s.title;
     $("#tour-text").textContent = s.text;
-    $("#tour-keys").innerHTML = (s.keys || []).map(([k, d]) => `<span><kbd>Ctrl</kbd><kbd>Alt</kbd><kbd>${k}</kbd>${esc(d)}</span>`).join("");
+    $("#tour-keys").innerHTML = (s.keys || [])
+      .map(([id, d]) => [((S && S.hotkeys.find((h) => h.id === id)) || {}).keys, d])
+      .filter(([k]) => k)
+      .map(([k, d]) => `<span>${k.split("+").map((p) => `<kbd>${esc(p)}</kbd>`).join("")}${esc(d)}</span>`)
+      .join("");
     $("#tour-back").hidden = this.i === 0;
     $("#tour-next").textContent = this.i === STEPS.length - 1 ? "Done" : "Next";
     const card = $("#tour-card");

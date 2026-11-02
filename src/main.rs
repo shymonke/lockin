@@ -2,12 +2,15 @@
 
 mod app;
 mod audio;
+mod autostart;
 mod ball;
 mod calc;
 mod camera;
 mod config;
 mod copy;
 mod expr;
+mod fold;
+mod feedback;
 mod hotkeys;
 mod memes;
 mod policy;
@@ -30,6 +33,7 @@ impl eframe::App for app::App {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.demo_backdrop(&ctx);
         self.pill_ui(ui);
         self.alert_window(&ctx);
         self.calc_window(&ctx);
@@ -55,7 +59,12 @@ fn main() {
     if !single_instance() {
         return;
     }
-    let s = config::Settings::load();
+    // `--demo [marks.json]`: scripted showcase on a throwaway data folder (see app/demo.rs).
+    let demo = (args.get(1).map(String::as_str) == Some("--demo")).then(|| args.get(2).map(std::path::PathBuf::from));
+    let s = match &demo {
+        Some(_) => app::demo::prepare(&config::Settings::load()),
+        None => config::Settings::load(),
+    };
     let icon = image::load_from_memory(include_bytes!("../assets/brand/png/app-icon-64.png"))
         .expect("embedded LockIn window icon")
         .into_rgba8();
@@ -74,7 +83,18 @@ fn main() {
         viewport = viewport.with_position([x, y]);
     }
     let options = eframe::NativeOptions { viewport, ..Default::default() };
-    let _ = eframe::run_native("LockIn", options, Box::new(move |cc| Ok(Box::new(app::App::new(cc, s)))));
+    let _ = eframe::run_native(
+        "LockIn",
+        options,
+        Box::new(move |cc| {
+            let mut app = app::App::new(cc, s);
+            if let Some(marks) = demo {
+                app.demo_seed();
+                app.demo = Some(app::demo::Demo::new(marks));
+            }
+            Ok(Box::new(app))
+        }),
+    );
 }
 
 /// One overlay at a time (hotkeys and the camera are exclusive anyway).
@@ -90,7 +110,8 @@ fn single_instance() -> bool {
 /// and print detections, poses and timings.
 fn diag(images: &[String]) {
     use std::time::Instant;
-    let calibration = config::Settings::load().calibration;
+    let settings = config::Settings::load();
+    let (calibration, gaze_mode) = (settings.calibration, settings.gaze_mode);
     let t = Instant::now();
     let face = vision::FaceModel::load().expect("face model");
     println!("face model load {:.0} ms", t.elapsed().as_secs_f64() * 1e3);
@@ -119,7 +140,7 @@ fn diag(images: &[String]) {
                 let feature = m.as_ref().map(|m| vision::feature_sample(&d, m));
                 let classified = feature
                     .as_ref()
-                    .and_then(|s| policy::classify_gaze_features(s, &calibration))
+                    .and_then(|s| policy::classify_gaze_features(s, &calibration, gaze_mode))
                     .unwrap_or((policy::classify_gaze(d.pose(), &calibration), 0.45));
                 println!(
                     "  face {:.2} rect {:?} head {:?} gaze {:?} look {:?} label {:?} confidence {:.2} | person {:.2} phone {:.2} | L1+mesh {l1:.1} ms, tracked mesh {l1_tracked:.1} ms (kept face: {tracked:?}) L2 {l2:.1} ms",

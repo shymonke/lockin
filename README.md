@@ -2,21 +2,40 @@
 
 Local study focus tracker for Windows. A small always-on-top timer bar runs your pomodoro and watches
 for distraction in layers: cheap checks run all the time, heavier ones only when something looks off.
-Nothing leaves your machine. Camera frames are analysed in memory and never saved. The screen layer
-never captures pixels.
+Nothing leaves your machine unless you send feedback from the main window. Camera frames are
+analysed in memory and never saved. The screen layer never captures pixels.
+
+[![LockIn demo: click to watch (56 s)](.github/demo-poster.jpg)](https://github.com/shymonke/lockin/releases/download/v0.1.0/lockin-demo.mp4)
+
+**[Download for Windows](https://github.com/shymonke/lockin/releases/latest)**: unzip and run `lockin.exe`
+(needs the WebView2 runtime, built into Windows 10 and 11).
 
 ## What you see
 
 - **Timer bar** (always on top): clock, status ("On your book", "Back in 1:42", "Distracted"), and
-  buttons for start/pause, step away, camera on/off, the calculator and the main window, and a ring that fills as the block runs. Drag it anywhere; set its resting opacity in Settings → Shortcuts (it turns fully visible on hover);
-  double- or right-click opens the main window. Ctrl+Alt+L makes it click-through.
+  buttons for start/pause, step away, camera on/off, the calculator and the main window, and a ring that fills as the block runs. Drag it anywhere; Settings → Timer bar sets its theme (Glass by
+  default, Slate, Midnight), resting opacity (fully visible on hover) and fold delay. Double- or right-click
+  opens the main window. Click-through (Settings → Timer bar, or a shortcut you bind) lets clicks
+  pass to the window below until you turn it off or restart LockIn. After a few idle seconds it folds into
+  a ball drawn like the LockIn mark: a clock ring that fills with the phase (green focus, blue
+  break), a hand at its end, and the calibration ball's blue in the middle (amber looking away, red
+  on a blocked site or alarm); Settings → Timer bar → Clock around the ball turns the ring and hand
+  off. Hovering the ball, or an alert, unfolds it, and alert cards grow out of the
+  ball. Minimising (Win+M, Win+D) never hides it.
 - **Tray icon**: click opens the main window; right-click for start/pause, step away, the
-  calculator, click-through and Quit. LockIn has no taskbar button.
-- **Main window** (Ctrl+Alt+O): your live camera with the tracking drawn over it — eye outlines,
-  irises, a gaze arrow and a plain-language label ("Looking at your book", 87 %). Below it the session
-  clock, start / step-away buttons and today's numbers. Settings slide in from the right. A short
-  spotlight tour runs on first open and replays from the question mark. "Hide the camera picture"
-  shows only the tracking lines (screen sharing).
+  calculator, click-through and Quit, each with its current shortcut. LockIn has no taskbar button:
+  minimising the main window tucks it into the tray.
+- **Main window** (Ctrl+Alt+O, which also brings the timer bar back): fits the window without
+  scrolling. On the left, your live camera at its own aspect ratio (nothing cropped) with the
+  tracking drawn over it — eye outlines, irises, a gaze arrow and a plain-language label ("Looking at
+  your book", 87 %) — and the year's pomodoro heatmap under it. On the right the session clock,
+  start / step-away buttons, today's numbers, and the task and idea lists, which scroll inside
+  their cards. Below 860 px wide the columns stack.
+  Settings slide in from the right. The header links to LockIn on GitHub and, in builds that carry a
+  feedback webhook, opens a feedback form that posts to the developer's Discord (message, optional
+  contact, app version; mentions disabled). A short spotlight tour runs on first open and replays from the
+  question mark. "Hide the camera picture" shows only the tracking lines (screen sharing). With the
+  camera off the preview stops too and the camera is released (its light goes out).
 - **Alert cards**: warnings, alarms and questions with painted cats (scuba cat and friends) or your
   own GIFs, plus a built-in or custom sound.
 - **Tasks** (Pomodoro style): one list for the day, each task with an estimate in pomodoros. The
@@ -63,9 +82,12 @@ flowchart LR
   middle, tip your head toward the keyboard and back with your eyes on it. Then read your book and
   look around the room. Redo it when you move the laptop. Uncalibrated, LockIn falls back to head pose.
   Calibrations saved by older versions (different features) are dropped on start; calibrate again.
-- **Eyes first**: the classifier weights iris position, eyelids, eye-look and gaze pitch (head pitch
-  plus the eyes' turn) above head angles and face position, so tipping your head toward the
-  keyboard while still reading the screen stays "screen".
+- **Eyes first**: the classifier weights iris position, eyelids, eye-look, gaze pitch and gaze yaw
+  (head angle plus the eyes' turn in the head) above head angles and face size/position, so tipping
+  or turning your head, or leaning in, while your eyes stay on the screen stays "screen". Gaze yaw is
+  derived from the stored features, so existing calibrations keep working. Settings → Camera →
+  "Decide by: Gaze only" uses nothing but the two gaze angles and eyelid openness (for comparing);
+  the main window's readout shows the live gaze yaw and pitch.
 - **Sites**: the first visit to a blocked site warns; the second visit, or staying past the limit,
   rings the alarm. Ask-sites (YouTube, Reddit) get "for study or distraction?". App names such as
   `discord.exe` work too.
@@ -76,14 +98,24 @@ flowchart LR
 
 ## Shortcuts
 
+Defaults below; rebind any of them in Settings → Shortcuts. A shortcut can be a key combo or a mouse
+input: wheel up/down, middle click, or the side buttons (Mouse 4 / 5), with or without modifiers.
+Key combos use `RegisterHotKey`; mouse shortcuts use a low-level mouse hook that is installed only
+while one is bound, or while Settings records a shortcut (middle and side buttons are captured
+there, since the page itself never receives Mouse 4). A bound mouse input is consumed (a bare
+wheel-down binding stops scrolling).
+
 | Keys | Action |
 |---|---|
 | Ctrl+Alt+P | Start / pause |
 | Ctrl+Alt+B | Step away / I'm back |
 | Ctrl+Alt+C | Calculator |
 | Ctrl+Alt+K | Camera on/off (screen checks keep running) |
-| Ctrl+Alt+O | Main window |
-| Ctrl+Alt+L | Timer bar click-through on/off |
+| Ctrl+Alt+O | Main window (and show the timer bar) |
+| (none) | Timer bar click-through on/off; unbound by default so it cannot be turned on by accident |
+
+**Start with Windows** (Settings → Shortcuts → Windows) adds a per-user Run entry for the exe you
+started; it is rewritten on every start, so sign-in launches the build you ran last.
 
 ## Resource use
 
@@ -121,7 +153,14 @@ Diagnostics (print only, nothing saved):
 - `lockin --diag img1.jpg img2.png` runs the same on images.
 - `lockin --diag-screen` prints what the screen layer sees (app, title, URL) for 15 s.
 
-Data lives in `%APPDATA%\LockIn` (`settings.json`, `stats.json`, `memes\`, `webview\`).
+Data lives in `%APPDATA%\LockIn` (`settings.json`, `stats.json`, `memes\`, `webview\`), outside the
+app folder, so a new build reads the same settings; settings it has never seen take their defaults.
+A file it cannot read is kept as `settings.json.unreadable` before defaults replace it.
+
+**Feedback webhook.** The Discord webhook URL is baked in at build time from the
+`LOCKIN_FEEDBACK_WEBHOOK` environment variable or a git-ignored `feedback-webhook.txt` in the repo
+root; without either the feedback button is hidden. Anyone holding a release exe can extract the
+URL, so treat it as public and delete/recreate the webhook in Discord if it is abused.
 
 ## Development
 
@@ -132,6 +171,19 @@ builds release, `-Once` builds and launches without watching. Close any other Lo
 instance). For throwaway settings set `$env:APPDATA = Join-Path $env:TEMP 'LockIn-dev'` before starting.
 
 Debug builds serve `assets/` from disk: edit HTML/CSS/JS and press F5 in the main window.
+
+### Demo video
+
+1. `powershell -ExecutionPolicy Bypass -File scripts/demo.ps1` (needs FFmpeg on PATH and a release
+   build in `target-fast`). It closes LockIn, covers the screen with a plain backdrop, records it while
+   `lockin --demo` plays every feature on a fixed ~80 s timeline, then restarts LockIn. The demo runs on
+   a throwaway data folder (`%TEMP%\LockIn-demo`), so your settings, tasks and stats are untouched; it
+   moves the mouse itself. Sit in front of the camera and follow the calibration ball with your eyes.
+   Footage lands in `demo-video/assets/footage/` (git-ignored).
+2. `cd demo-video && node build.mjs` turns the footage into a HyperFrames composition: one sped-up,
+   reframed clip per scene with its caption, plus the intro and end cards. Shot framing and speeds
+   are the `SHOTS` table in `build.mjs`; captions come from the demo's script in `src/app/demo.rs`.
+3. `npm run dev` previews it in the browser; `npm run render` writes the MP4.
 
 ## Limits
 

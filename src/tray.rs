@@ -6,7 +6,7 @@ use crate::hotkeys::Hotkey;
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::mpsc::Sender;
-use windows::core::{w, PCWSTR};
+use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Shell::{
@@ -25,14 +25,14 @@ const ICON_ID: u32 = 1;
 /// Resource id of the app icon in `assets/brand/app.rc`.
 const IDI_LOCKIN: u16 = 1;
 
-const MENU: [(Hotkey, PCWSTR); 7] = [
-    (Hotkey::Settings, w!("Open LockIn\tCtrl+Alt+O")),
-    (Hotkey::StartPause, w!("Start / pause\tCtrl+Alt+P")),
-    (Hotkey::Brb, w!("Step away / I'm back\tCtrl+Alt+B")),
-    (Hotkey::Camera, w!("Camera on / off\tCtrl+Alt+K")),
-    (Hotkey::Calculator, w!("Calculator\tCtrl+Alt+C")),
-    (Hotkey::ClickThrough, w!("Timer bar click-through\tCtrl+Alt+L")),
-    (Hotkey::Quit, w!("Quit LockIn")),
+const MENU: [(Hotkey, &str); 7] = [
+    (Hotkey::Settings, "Open LockIn"),
+    (Hotkey::StartPause, "Start / pause"),
+    (Hotkey::Brb, "Step away / I'm back"),
+    (Hotkey::Camera, "Camera on / off"),
+    (Hotkey::Calculator, "Calculator"),
+    (Hotkey::ClickThrough, "Timer bar click-through"),
+    (Hotkey::Quit, "Quit LockIn"),
 ];
 
 /// Tray window, kept so the icon can be removed from any thread on quit.
@@ -135,7 +135,13 @@ unsafe fn menu(hwnd: HWND) {
             if *hk == Hotkey::Quit {
                 let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
             }
-            let _ = AppendMenuW(menu, MF_STRING, i + 1, *label);
+            // Text, then the current shortcut right-aligned after a tab.
+            let text = match crate::hotkeys::current_label(*hk) {
+                Some(keys) => format!("{label}\t{keys}"),
+                None => label.to_string(),
+            };
+            let wide = HSTRING::from(text);
+            let _ = AppendMenuW(menu, MF_STRING, i + 1, PCWSTR(wide.as_ptr()));
         }
         let mut pt = POINT::default();
         let _ = GetCursorPos(&mut pt);

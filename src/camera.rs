@@ -13,11 +13,21 @@ pub struct Frame {
 }
 
 pub struct Camera {
+    /// Kept so `Drop` can shut it down: releasing the reader alone leaves the device (and its
+    /// privacy light) running.
+    source: IMFMediaSource,
     reader: IMFSourceReader,
     width: u32,
     height: u32,
     stride: i32,
     last_grab: Option<std::time::Instant>,
+}
+
+impl Drop for Camera {
+    fn drop(&mut self) {
+        // SAFETY: the source is live; Shutdown is the documented way to release the device.
+        let _ = unsafe { self.source.Shutdown() };
+    }
 }
 
 const STREAM: u32 = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
@@ -106,7 +116,7 @@ impl Camera {
             let cur = reader.GetCurrentMediaType(STREAM)?;
             let (width, height) = frame_size(&cur).unwrap_or((640, 480));
             let stride = cur.GetUINT32(&MF_MT_DEFAULT_STRIDE).map(|v| v as i32).unwrap_or(width as i32 * 4);
-            Ok(Camera { reader, width, height, stride, last_grab: None })
+            Ok(Camera { source, reader, width, height, stride, last_grab: None })
         }
     }
 

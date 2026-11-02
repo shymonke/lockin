@@ -1,0 +1,29 @@
+<template>
+  <style>
+    #root { position: absolute; inset: 0; background: #14171d; font-family: Inter, sans-serif; color: #e4e7ec; }
+    #intro-lockup { position: absolute; left: 50%; top: 42%; display: flex; align-items: center; gap: 40px; transform: translate(-50%, -50%); }
+    #intro-mark { width: 168px; height: 168px; }
+    #intro-name { font-size: 136px; font-weight: 700; letter-spacing: -0.03em; }
+    #intro-line { position: absolute; left: 0; right: 0; top: 62%; text-align: center; font-size: 46px; font-weight: 400; color: #8a93a3; letter-spacing: -0.01em; }
+  </style>
+  <div data-hf-id="hf-ypfn" id="root" data-composition-id="intro" data-width="1920" data-height="1080">
+    <div data-hf-id="hf-igt4" id="intro-lockup">
+      <svg data-hf-id="hf-3qfm" id="intro-mark" viewBox="0 0 64 64" aria-hidden="true">
+        <circle data-hf-id="hf-7ra5" id="intro-ring" cx="32" cy="32" r="23" fill="none" stroke="#8CC7A5" stroke-width="7" stroke-linecap="round" stroke-dasharray="116 29" transform="rotate(-38 32 32)" />
+        <g data-hf-id="hf-xf30" id="intro-hand-wrap"><path data-hf-id="hf-hxpd" id="intro-hand" d="M32 32 48.5 15.5" fill="none" stroke="#9BB0F0" stroke-width="7" stroke-linecap="round" /></g>
+        <circle data-hf-id="hf-evel" cx="32" cy="32" r="4.5" fill="#E4E7EC" />
+      </svg>
+      <span data-hf-id="hf-ro70" id="intro-name">LockIn</span>
+    </div>
+    <p data-hf-id="hf-9zh6" id="intro-line">The study timer that notices when you drift.</p>
+  </div>
+  <script>
+    const tl = gsap.timeline({ paused: true });
+    tl.fromTo("#intro-ring", { strokeDasharray: "0 145" }, { strokeDasharray: "116 29", duration: 0.7, ease: "expo.out" }, 0.1);
+    tl.fromTo("#intro-hand-wrap", { rotation: -150, svgOrigin: "32 32" }, { rotation: 0, svgOrigin: "32 32", duration: 0.7, ease: "back.out(1.4)" }, 0.25);
+    tl.fromTo("#intro-name", { opacity: 0, filter: "blur(8px)" }, { opacity: 1, filter: "blur(0px)", duration: 0.2, ease: "power4.out" }, 0.45);
+    tl.fromTo("#intro-line", { opacity: 0, filter: "blur(6px)" }, { opacity: 1, filter: "blur(0px)", duration: 0.2, ease: "power4.out" }, 0.8);
+    tl.to("#intro-lockup, #intro-line", { opacity: 0, filter: "blur(8px)", duration: 0.18, ease: "power3.in" }, 2.95);
+    window.__timelines["intro"] = tl;
+  </script>
+</template>

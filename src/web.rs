@@ -1,6 +1,8 @@
 //! Main window: a WebView2 page (assets/) hosted in a plain Win32 window on its own STA thread.
 //! The page polls `lockin://localhost/state|preview|frame` and posts actions over `window.ipc`.
 //! Closing the window ends the thread and the WebView2 processes, giving the memory back.
+//! LockIn lives in the tray: the window has no taskbar button, and minimising hides it (the tray
+//! icon brings it back).
 
 use raw_window_handle::{HandleError, HasWindowHandle, RawWindowHandle, Win32WindowHandle, WindowHandle};
 use std::borrow::Cow;
@@ -13,7 +15,8 @@ use windows::core::{w, BOOL, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_CAPTION_COLOR, DWMWA_USE_IMMERSIVE_DARK_MODE};
 use windows::Win32::Graphics::Gdi::{CreateSolidBrush, HBRUSH};
-use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED};
+use windows::Win32::UI::Shell::{ITaskbarList, TaskbarList};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -52,8 +55,11 @@ pub struct Dashboard {
 }
 
 impl Dashboard {
-    pub fn is_open(&self) -> bool {
-        self.hwnd.load(Ordering::Acquire) != 0
+    /// Open and on screen (not hidden to the tray or by the calibration ball).
+    pub fn is_visible(&self) -> bool {
+        let h = self.hwnd.load(Ordering::Acquire);
+        // SAFETY: IsWindowVisible tolerates stale handles.
+        h > 0 && unsafe { IsWindowVisible(HWND(h as *mut _)).as_bool() }
     }
 
     /// Open the window, or bring it to the front when it already exists.
@@ -92,6 +98,18 @@ impl Dashboard {
             }
         }
     }
+
+    /// Window rectangle on screen in physical pixels [left, top, width, height], while open.
+    pub fn rect(&self) -> Option<[i32; 4]> {
+        let h = self.hwnd.load(Ordering::Acquire);
+        if h <= 0 {
+            return None;
+        }
+        let mut r = RECT::default();
+        // SAFETY: GetWindowRect tolerates stale handles (it fails).
+        unsafe { GetWindowRect(HWND(h as *mut _), &mut r) }.ok()?;
+        Some([r.left, r.top, r.right - r.left, r.bottom - r.top])
+    }
 }
 
 struct Hwnd(isize);
@@ -118,6 +136,25 @@ fn client_bounds(hwnd: HWND) -> Rect {
     }
 }
 
+/// Posted to itself after the window shows: Explorer re-adds a taskbar button on every show.
+const WM_DROP_TAB: u32 = WM_APP + 3;
+
+thread_local! {
+    static TASKBAR: RefCell<Option<ITaskbarList>> = const { RefCell::new(None) };
+}
+
+/// Remove the window's taskbar button (LockIn is reached from the tray instead).
+unsafe fn drop_taskbar_tab(hwnd: HWND) {
+    TASKBAR.with_borrow_mut(|t| unsafe {
+        if t.is_none() {
+            *t = CoCreateInstance::<_, ITaskbarList>(&TaskbarList, None, CLSCTX_INPROC_SERVER).ok().filter(|l| l.HrInit().is_ok());
+        }
+        if let Some(l) = t {
+            let _ = l.DeleteTab(hwnd);
+        }
+    });
+}
+
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
         WM_SIZE => {
@@ -126,6 +163,19 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     let _ = v.set_bounds(client_bounds(hwnd));
                 }
             });
+            LRESULT(0)
+        }
+        WM_SHOWWINDOW if wp.0 != 0 => {
+            let _ = PostMessageW(Some(hwnd), WM_DROP_TAB, WPARAM(0), LPARAM(0));
+            DefWindowProcW(hwnd, msg, wp, lp)
+        }
+        WM_DROP_TAB => {
+            drop_taskbar_tab(hwnd);
+            LRESULT(0)
+        }
+        // Without a taskbar button a minimised window would park in the screen corner.
+        WM_SYSCOMMAND if wp.0 & 0xFFF0 == SC_MINIMIZE as usize => {
+            let _ = ShowWindow(hwnd, SW_HIDE);
             LRESULT(0)
         }
         WM_GETMINMAXINFO => {
@@ -263,6 +313,7 @@ fn run(slot: Arc<AtomicIsize>, shared: Arc<Shared>) {
             DispatchMessageW(&msg);
         }
         VIEW.with(|v| v.borrow_mut().take());
+        TASKBAR.with_borrow_mut(|t| t.take());
     }
     slot.store(0, Ordering::Release);
     post(serde_json::json!({ "cmd": "dashboard-closed" }));

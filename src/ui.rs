@@ -2,6 +2,7 @@
 //! Visual language matches the dashboard (assets/app.css): soft slate, regular weights, gentle fades.
 
 use crate::app::{App, Level};
+use crate::hotkeys::Hotkey;
 use crate::memes;
 use crate::policy::{Gaze, Kind};
 use crate::pomodoro::Phase;
@@ -12,6 +13,13 @@ use eframe::egui::{
 };
 
 pub const PILL: egui::Vec2 = vec2(554.0, 60.0);
+/// Seconds an alert card takes to grow out of the folded ball.
+const EMERGE: f32 = 0.45;
+
+fn ease_out(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    1.0 - (1.0 - t).powi(3)
+}
 
 fn mmss(secs: f64) -> String {
     let s = secs.max(0.0).ceil() as u64;
@@ -37,8 +45,8 @@ fn icon_button(ui: &mut Ui, rect: Rect, id: &str, tip: &str, glyph: char, ink: O
 }
 
 /// Camera toggle drawn with the painter (the Phosphor subset has no camera glyph); slashed when off.
-fn camera_button(ui: &mut Ui, rect: Rect, on: bool) -> bool {
-    let tip = if on { "Camera on: click to turn it off (Ctrl+Alt+K)" } else { "Camera off: click to turn it on (Ctrl+Alt+K)" };
+fn camera_button(ui: &mut Ui, rect: Rect, on: bool, hint: &str) -> bool {
+    let tip = if on { format!("Camera on: click to turn it off{hint}") } else { format!("Camera off: click to turn it on{hint}") };
     let r = ui.interact(rect, ui.scope_id().with("cam"), Sense::click()).on_hover_text(tip);
     let hover = ui.ctx().animate_bool_with_time(r.id, r.hovered(), 0.15);
     let p = ui.painter();
@@ -82,7 +90,7 @@ fn check_button(ui: &mut Ui, rect: Rect, tip: &str) -> bool {
 }
 
 /// Arc from 12 o'clock, clockwise, covering `frac` of the circle.
-fn arc(p: &egui::Painter, c: egui::Pos2, r: f32, frac: f32, stroke: Stroke) {
+pub(crate) fn arc(p: &egui::Painter, c: egui::Pos2, r: f32, frac: f32, stroke: Stroke) {
     let frac = frac.clamp(0.0, 1.0);
     if frac <= 0.0 {
         return;
@@ -253,25 +261,68 @@ impl App {
 
     /// Root viewport: the always-on-top timer bar.
     pub fn pill_ui(&mut self, ui: &mut Ui) {
-        if (self.cal.ball_pending || self.cal.ball.is_some()) && self.ball_frame(ui) {
-            return;
-        }
         let ctx = ui.ctx().clone();
+        if self.cal.ball_pending || self.cal.ball.is_some() {
+            if !self.fold.is_open() {
+                if let Some([x, y]) = self.s.overlay_pos {
+                    self.fold.reset(&ctx, pos2(x, y), PILL);
+                }
+            }
+            if self.ball_frame(ui) {
+                return;
+            }
+        }
         let full = ui.max_rect();
         let rect = Rect::from_min_size(full.min, PILL).shrink(2.0);
 
-        // Place top-centre on first run, then remember where the user drags it.
+        // Place top-centre on first run, then remember where the user drags it (only while the
+        // window is the pill: folded, it is the ball's small square).
         let info = ctx.input(|i| i.viewport().clone());
-        match (self.s.overlay_pos, info.monitor_size, info.outer_rect) {
-            (None, Some(m), _) => {
-                let p = pos2((m.x - PILL.x) / 2.0, 12.0);
-                ctx.send_viewport_cmd(ViewportCommand::OuterPosition(p));
-                self.s.overlay_pos = Some([p.x, p.y]);
+        if self.fold.is_open() {
+            match (self.s.overlay_pos, info.monitor_size, info.outer_rect) {
+                (None, Some(m), _) => {
+                    let p = pos2((m.x - PILL.x) / 2.0, 12.0);
+                    ctx.send_viewport_cmd(ViewportCommand::OuterPosition(p));
+                    self.s.overlay_pos = Some([p.x, p.y]);
+                }
+                (Some(saved), _, Some(r)) if (r.min.x - saved[0]).abs() > 1.0 || (r.min.y - saved[1]).abs() > 1.0 => {
+                    self.s.overlay_pos = Some([r.min.x.round(), r.min.y.round()]);
+                }
+                _ => {}
             }
-            (Some(saved), _, Some(r)) if (r.min.x - saved[0]).abs() > 1.0 || (r.min.y - saved[1]).abs() > 1.0 => {
-                self.s.overlay_pos = Some([r.min.x.round(), r.min.y.round()]);
+        }
+        let home = self.s.overlay_pos.map(|[x, y]| pos2(x, y)).or(info.outer_rect.map(|r| r.min)).unwrap_or(pos2(0.0, 0.0));
+
+        // A new alert unfolds the pill; when it was folded, the card grows out of the ball.
+        if let Some(a) = &self.alert {
+            if self.alert_seen != Some(a.opened) {
+                self.alert_seen = Some(a.opened);
+                self.alert_from = (!self.fold.is_open()).then(|| crate::fold::Fold::ball_center(home, PILL));
             }
-            _ => {}
+        }
+        let (tone, label) = self.status();
+        // The ball keeps the calibration ball's blue; it only changes for trouble.
+        let looking_away = self.pomo.focusing() && self.s.camera_enabled && matches!(self.cam.gaze, Some(Gaze::Away | Gaze::Absent));
+        let ball_tone = if self.on_blocked_site() || self.alarm_active() {
+            theme::ALERT
+        } else if looking_away {
+            theme::CAUTION
+        } else {
+            theme::GAZE
+        };
+        let (fill, edge_color) = theme::pill_colors(self.s.pill_theme);
+        let look = crate::fold::Look {
+            tone: soft_color(&ctx, Id::unique("ball-tone"), ball_tone),
+            ring: if self.pomo.phase == Phase::Focus { theme::FOCUS } else { theme::BREAK },
+            fill,
+            edge: edge_color,
+            progress: self.phase_progress(),
+            clock: self.s.pill_clock,
+        };
+        let hold_open = self.alert.is_some() || self.pill_adding;
+        let fold_after = self.s.pill_fold.then(|| std::time::Duration::from_secs(self.s.pill_fold_secs.max(1) as u64));
+        if !self.fold.frame(ui, home, PILL, &look, hold_open, fold_after) {
+            return;
         }
 
         let bg = ui.interact(rect, ui.scope_id().with("pill-bg"), Sense::click_and_drag());
@@ -287,11 +338,10 @@ impl App {
         let rest = self.s.pill_opacity.clamp(0.3, 1.0);
         ui.multiply_opacity(rest + (1.0 - rest) * lift);
 
-        let (tone, label) = self.status();
         let tone = soft_color(&ctx, Id::unique("pill-tone"), tone);
-        let edge = soft_color(&ctx, Id::unique("pill-edge"), if self.alarm_active() { theme::ALERT.gamma_multiply(0.55) } else { theme::LINE });
+        let edge = soft_color(&ctx, Id::unique("pill-edge"), if self.alarm_active() { theme::ALERT.gamma_multiply(0.55) } else { edge_color });
         let p = ui.painter().clone();
-        p.rect_filled(rect, CornerRadius::same(255), Color32::from_rgba_unmultiplied(27, 31, 39, 248));
+        p.rect_filled(rect, CornerRadius::same(255), fill);
         p.rect_stroke(rect, CornerRadius::same(255), Stroke::new(1.0, edge), StrokeKind::Inside);
 
         // Progress ring with the state dot in the middle.
@@ -339,33 +389,35 @@ impl App {
         p.line_segment([pos2(divider, cy - 13.0), pos2(divider, cy + 13.0)], Stroke::new(1.0, theme::LINE));
         let task_rect = Rect::from_min_max(pos2(text_x + 1.0, top + clock.size().y + gap), pos2(divider - 7.0, top + clock.size().y + gap + 17.0));
         self.pill_task_ui(ui, task_rect);
-        if icon_button(ui, app, "app", "Open LockIn (Ctrl+Alt+O)", icon::APP, None) {
+        let keys = self.s.keybinds.clone();
+        let hint = |hk| keys.hint(hk);
+        if icon_button(ui, app, "app", &format!("Open LockIn{}", hint(Hotkey::Settings)), icon::APP, None) {
             self.open_dashboard();
         }
-        if icon_button(ui, calc, "calc", "Calculator (Ctrl+Alt+C)", icon::CALCULATOR, None) {
+        if icon_button(ui, calc, "calc", &format!("Calculator{}", hint(Hotkey::Calculator)), icon::CALCULATOR, None) {
             self.calc_open = !self.calc_open;
             if self.calc_open {
                 self.calc.open();
                 self.calc_min = false;
             }
         }
-        if camera_button(ui, cam, self.s.camera_enabled) {
+        if camera_button(ui, cam, self.s.camera_enabled, &hint(Hotkey::Camera)) {
             self.toggle_camera();
         }
         let back = self.pomo.brb.is_some() || self.alarm_active();
         let can_step_away = self.pomo.focusing();
         let (glyph, ink, tip) = if back {
-            (icon::BACK, Some(theme::FOCUS), "I'm back (Ctrl+Alt+B)")
+            (icon::BACK, Some(theme::FOCUS), "I'm back")
         } else if can_step_away {
-            (icon::COFFEE, None, "Step away without alarms (Ctrl+Alt+B)")
+            (icon::COFFEE, None, "Step away without alarms")
         } else {
-            (icon::COFFEE, Some(theme::MUTED.gamma_multiply(0.45)), "Step away works during a focus block (Ctrl+Alt+B)")
+            (icon::COFFEE, Some(theme::MUTED.gamma_multiply(0.45)), "Step away works during a focus block")
         };
-        if icon_button(ui, brb, "brb", tip, glyph, ink) && (back || can_step_away) {
+        if icon_button(ui, brb, "brb", &format!("{tip}{}", hint(Hotkey::Brb)), glyph, ink) && (back || can_step_away) {
             self.brb_or_back();
         }
         let glyph = if self.pomo.running { icon::PAUSE } else { icon::PLAY };
-        if icon_button(ui, play, "play", "Start or pause (Ctrl+Alt+P)", glyph, Some(theme::TEXT)) {
+        if icon_button(ui, play, "play", &format!("Start or pause{}", hint(Hotkey::StartPause)), glyph, Some(theme::TEXT)) {
             self.toggle_timer();
         }
         if lift > 0.0 && lift < 1.0 {
@@ -379,10 +431,20 @@ impl App {
         let size = vec2(440.0, if has_meme { 410.0 } else { 196.0 });
         let monitor = ctx.input_for(ViewportId::ROOT, |i| i.viewport().monitor_size).unwrap_or(vec2(1920.0, 1080.0));
         let level = alert.level;
+        let mut at = pos2((monitor.x - size.x) / 2.0, 84.0);
+        // Out of the folded ball: the window starts with its top centre on the ball and glides
+        // to its place while the card grows (see `alert_ui`).
+        if let Some(from) = self.alert_from {
+            let k = ease_out(alert.opened.elapsed().as_secs_f32() / EMERGE);
+            if k < 1.0 {
+                let start = from - vec2(size.x / 2.0, 4.0 + crate::fold::R);
+                at = start + (at - start) * k;
+            }
+        }
         let builder = ViewportBuilder::default()
             .with_title("LockIn alert")
             .with_inner_size(size)
-            .with_position(pos2((monitor.x - size.x) / 2.0, 84.0))
+            .with_position(at)
             .with_decorations(false)
             .with_transparent(true)
             .with_resizable(false)
@@ -396,22 +458,42 @@ impl App {
     fn alert_ui(&mut self, ui: &mut Ui) {
         let Some(alert) = &mut self.alert else { return };
         let ctx = ui.ctx().clone();
-        let t = alert.opened.elapsed().as_secs_f32();
-        // Fade and settle in.
-        let a = (t / 0.25).min(1.0);
-        let ease = 1.0 - (1.0 - a).powi(3);
-        ui.multiply_opacity(ease);
-        let rect = ui.max_rect().shrink(4.0).translate(vec2(0.0, (1.0 - ease) * 10.0));
-        let bg = ui.interact(rect, ui.scope_id().with("alert-bg"), Sense::click_and_drag());
-        if bg.drag_started() {
-            ctx.send_viewport_cmd(ViewportCommand::StartDrag);
-        }
+        let mut t = alert.opened.elapsed().as_secs_f32();
         let (accent, tag) = match alert.level {
             Level::Alarm => (theme::ALERT, "Alarm"),
             Level::Warn => (theme::CAUTION, "Heads up"),
             Level::Ask => (theme::GAZE, "Quick question"),
             Level::Info => (theme::FOCUS, "LockIn"),
         };
+        if self.alert_from.is_some() {
+            if t < EMERGE {
+                // The card grows out of the ball at the window's top centre.
+                ctx.request_repaint();
+                let k = ease_out(t / EMERGE);
+                let full = ui.max_rect().shrink(4.0);
+                let ball = Rect::from_center_size(pos2(full.center().x, full.top() + crate::fold::R), egui::Vec2::splat(crate::fold::R * 2.0));
+                let r = Rect::from_min_max(ball.min.lerp(full.min, k), ball.max.lerp(full.max, k));
+                let from = if matches!(alert.kind, Some(Kind::Site(_) | Kind::ScreenSite(_))) { theme::ALERT } else { accent };
+                let radius = (crate::fold::R + (20.0 - crate::fold::R) * k) as u8;
+                ui.painter().rect_filled(r, CornerRadius::same(radius), from.lerp_to_gamma(theme::SURFACE, k));
+                return;
+            }
+            t -= EMERGE;
+        }
+        // Fade and settle in (an emerged card keeps its shell and fades in only the content).
+        let emerged = self.alert_from.is_some();
+        if emerged {
+            ui.painter().rect_filled(ui.max_rect().shrink(4.0), CornerRadius::same(20), theme::SURFACE);
+        }
+        let a = (t / 0.25).min(1.0);
+        let ease = 1.0 - (1.0 - a).powi(3);
+        ui.multiply_opacity(ease);
+        let drop = if emerged { 0.0 } else { (1.0 - ease) * 10.0 };
+        let rect = ui.max_rect().shrink(4.0).translate(vec2(0.0, drop));
+        let bg = ui.interact(rect, ui.scope_id().with("alert-bg"), Sense::click_and_drag());
+        if bg.drag_started() {
+            ctx.send_viewport_cmd(ViewportCommand::StartDrag);
+        }
         let p = ui.painter().clone();
         p.rect_filled(rect, CornerRadius::same(20), theme::SURFACE);
         p.rect_stroke(rect, CornerRadius::same(20), Stroke::new(1.0, theme::LINE), StrokeKind::Inside);

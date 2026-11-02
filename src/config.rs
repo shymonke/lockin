@@ -62,6 +62,28 @@ pub enum CameraMode {
     Always,
 }
 
+/// Which features decide screen / book / away.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum GazeMode {
+    /// Gaze angles first, head pose and face placement as light hints.
+    #[default]
+    Combined,
+    /// Only the gaze angles (head plus eyes) and eyelid openness.
+    GazeOnly,
+}
+
+/// Timer bar look.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PillTheme {
+    /// Soft slate, like the main window.
+    Slate,
+    /// Near-black with a brighter edge, for light wallpapers.
+    Midnight,
+    /// See-through, only the text and ring stay solid.
+    #[default]
+    Glass,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub enum Sound {
     Builtin(String),
@@ -117,6 +139,8 @@ pub struct Settings {
     pub calibration: Calibration,
     /// Dashboard shows only the tracking lines, not the camera picture (privacy / screen sharing).
     pub hide_camera_image: bool,
+    /// Features the gaze classifier uses (testing switch in Settings → Camera).
+    pub gaze_mode: GazeMode,
 
     // Screen layer
     pub screen_enabled: bool,
@@ -140,8 +164,17 @@ pub struct Settings {
     pub overlay_click_through: bool,
     /// Timer bar opacity when not hovered (0.3..1).
     pub pill_opacity: f32,
+    /// Fold the timer bar into a small status ball after `pill_fold_secs` without the mouse on it.
+    pub pill_fold: bool,
+    pub pill_fold_secs: u32,
+    /// Draw the folded ball as a clock (phase ring and hand); off leaves the plain ball.
+    pub pill_clock: bool,
+    pub pill_theme: PillTheme,
     pub calc_pos: Option<[f32; 2]>,
     pub tour_done: bool,
+    /// Start LockIn when the user signs in to Windows (HKCU Run entry).
+    pub launch_at_startup: bool,
+    pub keybinds: crate::hotkeys::Keybinds,
 }
 
 impl Default for Settings {
@@ -181,6 +214,7 @@ impl Default for Settings {
             phone_check_secs: 45,
             calibration: Calibration::default(),
             hide_camera_image: false,
+            gaze_mode: GazeMode::Combined,
 
             screen_enabled: true,
             blocked_sites: s(&["x.com", "twitter.com", "instagram.com", "tiktok.com", "facebook.com"]),
@@ -200,8 +234,14 @@ impl Default for Settings {
             overlay_pos: None,
             overlay_click_through: false,
             pill_opacity: 0.92,
+            pill_fold: true,
+            pill_fold_secs: 6,
+            pill_clock: true,
+            pill_theme: PillTheme::Glass,
             calc_pos: None,
             tour_done: false,
+            launch_at_startup: false,
+            keybinds: crate::hotkeys::Keybinds::default(),
         }
     }
 }
@@ -265,7 +305,7 @@ impl Stats {
     }
 }
 
-fn days_since_epoch_today() -> i64 {
+pub(crate) fn days_since_epoch_today() -> i64 {
     local_now_secs().div_euclid(86_400)
 }
 
@@ -295,7 +335,7 @@ pub fn today_string() -> String {
     civil_from_days(days_since_epoch_today())
 }
 
-fn civil_from_days(z: i64) -> String {
+pub(crate) fn civil_from_days(z: i64) -> String {
     // Howard Hinnant's days -> civil date.
     let z = z + 719_468;
     let era = z.div_euclid(146_097);
@@ -323,15 +363,26 @@ fn parse_day(s: &str) -> Option<i64> {
 }
 
 pub fn data_dir() -> PathBuf {
+    // `lockin --demo` points this at a throwaway folder so the user's data is never touched.
+    if let Some(dir) = std::env::var_os("LOCKIN_DATA_DIR") {
+        return PathBuf::from(dir);
+    }
     let base = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
     base.join("LockIn")
 }
 
 fn load<T: for<'de> Deserialize<'de> + Default>(name: &str) -> T {
-    std::fs::read(data_dir().join(name))
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_default()
+    let path = data_dir().join(name);
+    let Ok(bytes) = std::fs::read(&path) else { return T::default() };
+    match serde_json::from_slice(&bytes) {
+        Ok(v) => v,
+        Err(_) => {
+            // Unreadable (corrupt, or written by a build whose format this one cannot read): keep
+            // a copy before the defaults are saved over it.
+            let _ = std::fs::copy(&path, data_dir().join(format!("{name}.unreadable")));
+            T::default()
+        }
+    }
 }
 
 fn save<T: Serialize>(name: &str, value: &T) {
@@ -350,6 +401,8 @@ impl Settings {
     pub fn load() -> Self {
         let mut s: Self = load("settings.json");
         s.calibration.drop_stale_samples();
+        // Every launch starts with a clickable timer bar; click-through lasts until LockIn quits.
+        s.overlay_click_through = false;
         s
     }
     pub fn save(&self) {

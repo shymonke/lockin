@@ -1,3 +1,9 @@
 /target*/
 /.scratch/
 /run/
+/feedback-webhook.txt
+/demo-video/assets/footage/
+/demo-video/renders/
+/demo-video/node_modules/
+/demo-video/.hyperframes/
+/demo-video/.thumbnails/

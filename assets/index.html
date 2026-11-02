@@ -14,6 +14,12 @@
       <i class="ph" aria-hidden="true">&#xe9b2;</i>
       <select id="camera" aria-label="Camera"></select>
     </label>
+    <button class="icon" id="open-feedback" title="Send feedback" aria-label="Send feedback" hidden>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5A1.5 1.5 0 0 1 5.5 4h13A1.5 1.5 0 0 1 20 5.5v9a1.5 1.5 0 0 1-1.5 1.5H10l-4.5 4v-4h0A1.5 1.5 0 0 1 4 14.5z"/><path d="M8.5 9h7M8.5 12h4.5"/></svg>
+    </button>
+    <button class="icon" id="open-github" title="LockIn on GitHub" aria-label="LockIn on GitHub">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path class="fill" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+    </button>
     <button class="icon" id="help" title="Show me around" aria-label="Show me around">
       <i class="ph" aria-hidden="true">&#xe3e8;</i>
     </button>
@@ -24,6 +30,7 @@
 </header>
 
 <main>
+  <div class="col col-main">
   <section class="stage" id="stage" aria-label="Camera">
     <canvas id="view"></canvas>
     <div class="stage-empty" id="stage-empty" hidden>
@@ -33,31 +40,19 @@
     <button class="ghost stage-cal" id="calibrate"><i class="ph" aria-hidden="true">&#xe1d6;</i>Calibrate</button>
     <dl class="readout" id="readout" aria-label="Live measurements">
       <div><dt>Head</dt><dd id="r-head">–</dd></div>
+      <div><dt>Gaze</dt><dd id="r-gaze">–</dd></div>
       <div><dt>Eyes</dt><dd id="r-eyes">–</dd></div>
       <div><dt>Check</dt><dd id="r-ms">–</dd></div>
     </dl>
   </section>
 
-  <section class="task-space" aria-label="Pomodoro tasks">
-    <div class="task-columns">
-      <div class="task-panel">
-        <div class="panel-head"><div><h2>Today’s tasks</h2><p>One task stays active through each focus block.</p></div></div>
-        <form class="task-add" id="task-add"><input id="task-title" maxlength="160" placeholder="Add a task…" aria-label="New task"><label>Estimate <input id="task-estimate" type="number" min="1" max="99" value="1"></label><button class="secondary" type="submit">Add</button></form>
-        <div class="task-list" id="task-list"></div>
-        <details class="done-today" id="done-today"><summary>Done today <span id="done-count">0</span></summary><div id="done-list"></div></details>
-      </div>
-      <div class="task-panel ideas-panel">
-        <div class="panel-head"><div><h2>Side ideas</h2><p>Park it now. Revisit it after studying.</p></div></div>
-        <form class="task-add idea-add" id="idea-add"><input id="idea-title" maxlength="160" placeholder="Something to look up…" aria-label="New side idea"><button class="secondary" type="submit">Add</button></form>
-        <div class="idea-list" id="idea-list"></div>
-      </div>
-    </div>
-    <div class="history-panel">
-      <div class="history-head"><div><h2 id="history-total">0 pomodoros in the last year</h2><p><span id="history-streak">0</span> day current streak</p></div><div class="heat-legend"><span>Less</span><i data-level="0"></i><i data-level="1"></i><i data-level="2"></i><i data-level="3"></i><i data-level="4"></i><span>More</span></div></div>
-      <div class="heat-wrap"><div class="heat-labels"><span>Mon</span><span>Wed</span><span>Fri</span></div><div class="heat-main"><div class="heat-months" id="heat-months"></div><div class="heatmap" id="heatmap"></div></div></div>
-    </div>
+  <section class="history-panel" aria-label="Pomodoro history">
+    <div class="history-head"><div><h2 id="history-total">0 pomodoros in the last year</h2><p><span id="history-streak">0</span> day current streak</p></div><div class="heat-legend"><span>Less</span><i data-level="0"></i><i data-level="1"></i><i data-level="2"></i><i data-level="3"></i><i data-level="4"></i><span>More</span></div></div>
+    <div class="heat-wrap"><div class="heat-labels"><span>Mon</span><span>Wed</span><span>Fri</span></div><div class="heat-main"><div class="heat-months" id="heat-months"></div><div class="heatmap" id="heatmap"></div></div></div>
   </section>
+  </div>
 
+  <div class="col col-side">
   <section class="session" aria-label="Session">
     <div class="clock">
       <div class="time" id="time">25:00</div>
@@ -65,7 +60,7 @@
     </div>
     <div class="session-actions">
       <button class="primary" id="start"><i class="ph lead" aria-hidden="true">&#xe3d0;</i><span>Start focus</span></button>
-      <button class="secondary" id="brb" title="Ctrl+Alt+B"><i class="ph lead" aria-hidden="true">&#xe1c2;</i><span>Step away</span></button>
+      <button class="secondary" id="brb"><i class="ph lead" aria-hidden="true">&#xe1c2;</i><span>Step away</span></button>
       <button class="icon quiet" id="skip" title="Skip to next phase" aria-label="Skip to next phase">
         <i class="ph" aria-hidden="true">&#xe5a6;</i>
       </button>
@@ -79,6 +74,19 @@
     <div class="stat"><span class="v" id="t-streak">0</span><span class="k">clean blocks in a row</span></div>
     <div class="stat"><span class="v" id="t-dist">0</span><span class="k">distractions</span></div>
   </section>
+
+  <section class="task-panel" aria-label="Today's tasks">
+    <div class="panel-head"><div><h2>Today’s tasks</h2><p>One task stays active through each focus block.</p></div></div>
+    <form class="task-add" id="task-add"><input id="task-title" maxlength="160" placeholder="Add a task…" aria-label="New task"><label>Estimate <input id="task-estimate" type="number" min="1" max="99" value="1"></label><button class="secondary" type="submit">Add</button></form>
+    <div class="task-list" id="task-list"></div>
+    <details class="done-today" id="done-today"><summary>Done today <span id="done-count">0</span></summary><div id="done-list"></div></details>
+  </section>
+  <section class="task-panel ideas-panel" aria-label="Side ideas">
+    <div class="panel-head"><div><h2>Side ideas</h2><p>Park it now. Revisit it after studying.</p></div></div>
+    <form class="task-add idea-add" id="idea-add"><input id="idea-title" maxlength="160" placeholder="Something to look up…" aria-label="New side idea"><button class="secondary" type="submit">Add</button></form>
+    <div class="idea-list" id="idea-list"></div>
+  </section>
+  </div>
 </main>
 
 <!-- Settings sheet -->
@@ -94,6 +102,7 @@
     <button data-sec="sites">Sites</button>
     <button data-sec="penalties">Penalties</button>
     <button data-sec="alerts">Alerts</button>
+    <button data-sec="pill">Timer bar</button>
     <button data-sec="keys">Shortcuts</button>
   </nav>
   <div class="sheet-body" id="sheet-body"></div>
@@ -113,6 +122,21 @@
       <button class="primary" id="cal-go">Start</button>
     </div>
   </div>
+</div>
+
+<!-- Feedback -->
+<div class="modal" id="feedback" hidden role="dialog" aria-modal="true" aria-labelledby="feedback-title">
+  <form class="feedback-card" id="feedback-form">
+    <h3 id="feedback-title">Send feedback</h3>
+    <p>A bug, an idea, something that annoyed you. It goes straight to the developer.</p>
+    <textarea id="feedback-message" class="field" rows="6" placeholder="What happened, or what would make LockIn better?" aria-label="Feedback"></textarea>
+    <input id="feedback-contact" class="field" maxlength="200" placeholder="Discord or email, if you want a reply (optional)" aria-label="Contact, optional">
+    <p class="feedback-error" id="feedback-error" role="alert" hidden></p>
+    <div class="cal-actions">
+      <button class="secondary" type="button" id="feedback-cancel">Cancel</button>
+      <button class="primary" type="submit" id="feedback-send">Send</button>
+    </div>
+  </form>
 </div>
 
 <!-- Tour -->

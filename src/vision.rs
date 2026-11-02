@@ -162,6 +162,8 @@ pub struct Overlay {
     pub eyes: Vec<EyeOverlay>,
     pub head: Option<[f32; 3]>,
     pub gaze: Option<[f32; 2]>,
+    /// Gaze yaw and pitch in degrees (head plus eyes), what the classifier steers by.
+    pub gaze_deg: Option<[f32; 2]>,
     pub label: Option<String>,
     pub confidence: f32,
     pub person: Option<f32>,
@@ -540,6 +542,7 @@ pub enum Cmd {
     /// Live preview for the dashboard: `Some(camera)` on, `None` off.
     Preview(Option<u32>),
     SetCalibration(Calibration),
+    SetGazeMode(crate::config::GazeMode),
     Calibrate { camera: u32, target: CalTarget },
     Quit,
 }
@@ -606,6 +609,7 @@ struct Worker {
     obj: Option<(ObjectModel, Instant)>,
     last_objects: Option<Objects>,
     calibration: Calibration,
+    gaze_mode: crate::config::GazeMode,
     frame: Frame,
     /// Face box from the previous frame's mesh: seeds the next crop so YuNet only runs to
     /// (re)acquire the face, as in MediaPipe's tracking mode.
@@ -670,7 +674,7 @@ impl Worker {
             .zip(mesh.as_ref())
             .map(|(f, m)| feature_sample(f, m));
         let gaze = match (face, feature.as_ref()) {
-            (Some(f), Some(s)) => classify_gaze_features(s, &self.calibration)
+            (Some(f), Some(s)) => classify_gaze_features(s, &self.calibration, self.gaze_mode)
                 .or_else(|| Some((classify_gaze(f.pose(), &self.calibration), 0.45))),
             (Some(f), None) => Some((classify_gaze(f.pose(), &self.calibration), 0.35)),
             (None, _) => Some((Gaze::Absent, 1.0)),
@@ -741,6 +745,7 @@ impl Worker {
             eyes: a.mesh.as_ref().map(Mesh::overlays).unwrap_or_default(),
             head: a.mesh.as_ref().map(Mesh::head),
             gaze: a.mesh.as_ref().map(Mesh::direction),
+            gaze_deg: a.feature.as_ref().map(|s| [crate::policy::gaze_yaw(s.values[0], (s.values[3] + s.values[5]) * 0.5), s.values[14]]),
             label,
             confidence: a.gaze.map_or(0.0, |g| g.1),
             person: last.map(|o| o.person),
@@ -866,6 +871,7 @@ pub fn spawn(rx: Receiver<Cmd>, tx: Sender<Msg>, wake: Box<dyn Fn() + Send>, pre
                 obj: None,
                 last_objects: None,
                 calibration: Calibration::default(),
+                gaze_mode: Default::default(),
                 frame: Frame {
                     width: 0,
                     height: 0,
@@ -937,6 +943,10 @@ pub fn spawn(rx: Receiver<Cmd>, tx: Sender<Msg>, wake: Box<dyn Fn() + Send>, pre
                     }
                     Some(Cmd::SetCalibration(cal)) => {
                         w.calibration = cal;
+                        continue;
+                    }
+                    Some(Cmd::SetGazeMode(mode)) => {
+                        w.gaze_mode = mode;
                         continue;
                     }
                     Some(Cmd::Fast(on)) => {
