@@ -47,11 +47,26 @@ pub struct TaskStore {
     pub history: Vec<DayHistory>,
     pub active_task: Option<u64>,
     next_id: u64,
+    /// `tasks.json` existed but could not be read, and no copy of it could be kept: saving would
+    /// overwrite the only copy, so saves are skipped this run.
+    #[serde(skip)]
+    read_only: bool,
+    /// Set when loading had to fall back to an empty store; the app shows it once.
+    #[serde(skip)]
+    pub load_note: Option<String>,
 }
 
 impl Default for TaskStore {
     fn default() -> Self {
-        Self { tasks: Vec::new(), ideas: Vec::new(), history: Vec::new(), active_task: None, next_id: 1 }
+        Self {
+            tasks: Vec::new(),
+            ideas: Vec::new(),
+            history: Vec::new(),
+            active_task: None,
+            next_id: 1,
+            read_only: false,
+            load_note: None,
+        }
     }
 }
 
@@ -61,10 +76,29 @@ impl TaskStore {
     }
 
     pub fn load_from(path: &Path) -> Self {
-        let mut store: Self = std::fs::read(path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default();
+        let mut store: Self = match std::fs::read(path) {
+            Ok(bytes) => match serde_json::from_slice(&bytes) {
+                Ok(store) => store,
+                Err(_) => {
+                    // Corrupt, or written by a build whose format this one cannot read: keep the
+                    // bytes under a new name before the empty store is saved over the file.
+                    match keep_unreadable(path, &bytes) {
+                        Ok(backup) => Self {
+                            load_note: Some(format!(
+                                "tasks.json could not be read; it was kept as {} and LockIn started a new list.",
+                                backup.file_name().and_then(|n| n.to_str()).unwrap_or("a backup")
+                            )),
+                            ..Self::default()
+                        },
+                        Err(_) => Self::unsaved("tasks.json could not be read or backed up; changes this session won't be saved."),
+                    }
+                }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::default(),
+            // Locked or unreadable right now (antivirus, sync tool): the file may be fine, so never
+            // replace it with an empty store.
+            Err(_) => Self::unsaved("tasks.json could not be opened; changes this session won't be saved. Restart LockIn."),
+        };
         let max_id = store.tasks.iter().map(|t| t.id).chain(store.ideas.iter().map(|i| i.id)).max().unwrap_or(0);
         store.next_id = store.next_id.max(max_id.saturating_add(1)).max(1);
         store.normalize_active();
@@ -72,7 +106,14 @@ impl TaskStore {
         store
     }
 
+    fn unsaved(note: &str) -> Self {
+        Self { read_only: true, load_note: Some(note.into()), ..Self::default() }
+    }
+
     pub fn save(&self) {
+        if self.read_only {
+            return;
+        }
         let _ = self.save_to(&crate::config::data_dir().join("tasks.json"));
     }
 
@@ -256,6 +297,27 @@ pub fn now_secs() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
+/// Copy an unreadable store to `<name>.unreadable-<secs>` beside it, never over an earlier copy:
+/// a name already taken (same second, clock moved back) gets `-1`, `-2`… appended.
+fn keep_unreadable(path: &Path, bytes: &[u8]) -> std::io::Result<std::path::PathBuf> {
+    use std::io::Write;
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("tasks.json");
+    let stem = format!("{name}.unreadable-{}", now_secs());
+    for n in 0..100u32 {
+        let backup = path.with_file_name(if n == 0 { stem.clone() } else { format!("{stem}-{n}") });
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&backup) {
+            Ok(mut f) => {
+                f.write_all(bytes)?;
+                f.sync_all()?;
+                return Ok(backup);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "no free backup name"))
+}
+
 fn parse_day(s: &str) -> Option<i64> {
     let mut it = s.split('-').map(|p| p.parse::<i64>().ok());
     let (y, m, d) = (it.next()??, it.next()??, it.next()??);
@@ -341,15 +403,43 @@ mod tests {
     }
 
     #[test]
-    fn corrupt_file_loads_as_empty_store() {
+    fn corrupt_files_are_kept_without_overwriting_earlier_copies() {
         let dir = std::env::temp_dir().join(format!("lockin-task-test-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("tasks.json");
-        std::fs::write(&path, b"{ definitely not json").unwrap();
-        let s = TaskStore::load_from(&path);
-        assert!(s.tasks.is_empty());
-        assert_eq!(s.active_task, None);
-        let _ = std::fs::remove_file(path);
-        let _ = std::fs::remove_dir(dir);
+        // Two bad loads in the same second must not share a backup name.
+        for bad in [&b"{ first bad"[..], &b"{ second bad"[..]] {
+            std::fs::write(&path, bad).unwrap();
+            let s = TaskStore::load_from(&path);
+            assert!(s.tasks.is_empty());
+            assert!(!s.read_only, "a kept copy makes it safe to save over the file");
+            assert!(s.load_note.is_some());
+        }
+        let mut kept: Vec<Vec<u8>> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("tasks.json.unreadable-"))
+            .map(|e| std::fs::read(e.path()).unwrap())
+            .collect();
+        kept.sort();
+        assert_eq!(kept, vec![b"{ first bad".to_vec(), b"{ second bad".to_vec()]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn missing_file_starts_empty_and_saves() {
+        let dir = std::env::temp_dir().join(format!("lockin-task-new-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("tasks.json");
+        let mut s = TaskStore::load_from(&path);
+        assert!(!s.read_only);
+        assert!(s.load_note.is_none());
+        s.add_task("Chapter 3", 2, 10).unwrap();
+        s.save_to(&path).unwrap();
+        let back = TaskStore::load_from(&path);
+        assert_eq!(back.tasks.len(), 1);
+        assert_eq!(back.tasks[0].title, "Chapter 3");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

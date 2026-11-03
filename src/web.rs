@@ -2,7 +2,7 @@
 //! The page polls `lockin://localhost/state|preview|frame` and posts actions over `window.ipc`.
 //! Closing the window ends the thread and the WebView2 processes, giving the memory back.
 //! LockIn lives in the tray: the window has no taskbar button, and minimising hides it (the tray
-//! icon brings it back).
+//! icon brings it back). While hidden the WebView is marked invisible and asked to trim memory.
 
 use raw_window_handle::{HandleError, HasWindowHandle, RawWindowHandle, Win32WindowHandle, WindowHandle};
 use std::borrow::Cow;
@@ -21,21 +21,31 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use wry::http::{header::CONTENT_TYPE, Request, Response};
-use wry::{Rect, WebContext, WebView, WebViewBuilder, WebViewBuilderExtWindows};
+use wry::{NewWindowResponse, Rect, WebContext, WebView, WebViewBuilder, WebViewBuilderExtWindows};
 
 static INDEX: &str = include_str!("../assets/index.html");
 static CSS: &str = include_str!("../assets/app.css");
 static JS: &str = include_str!("../assets/app.js");
 static ICON_FONT: &[u8] = crate::theme::ICON_FONT;
 
-/// Keep WebView2 small: one renderer, no GPU process (the page is a canvas at ~15 fps, software
-/// raster is plenty), no background services. wry's defaults (no mini menu / SmartScreen) kept.
-const BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
+/// Keep WebView2 small: one renderer, no GPU acceleration (the page is a canvas at ~15 fps,
+/// software raster is plenty), no background services. The compositor, network service and
+/// audio run inside the browser process instead of three more processes (~50 MB working set
+/// saved, measured on WebView2 156). `--single-process` would save more but is unsupported.
+/// wry's defaults (no mini menu / SmartScreen) kept.
+const BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,AudioServiceOutOfProcess \
+    --enable-features=NetworkServiceInProcess2 --in-process-gpu \
     --disable-gpu --disable-gpu-compositing --renderer-process-limit=1 --disable-background-networking \
     --disable-component-update --disable-sync --no-first-run --disable-breakpad";
 
 /// Background matches the page so opening never flashes white.
 const BG: (u8, u8, u8) = (20, 23, 29);
+
+/// The page's origin. On Windows wry serves `lockin://localhost/` as `http://lockin.localhost/`
+/// (WebView2 custom-scheme workaround); both spellings are accepted.
+fn is_app_url(url: &str) -> bool {
+    url.starts_with("http://lockin.localhost/") || url.starts_with("lockin://localhost/")
+}
 
 /// What the page can read; filled by the app thread.
 pub struct Shared {
@@ -136,6 +146,27 @@ fn client_bounds(hwnd: HWND) -> Rect {
     }
 }
 
+/// Hidden (tray, calibration): tell WebView2 so the page reads as hidden (the preview stops
+/// polling) and the renderer trims its memory; restore both when shown again.
+fn set_view_shown(shown: bool) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        ICoreWebView2_19, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL,
+    };
+    use windows::core::Interface;
+    use wry::WebViewExtWindows;
+    VIEW.with_borrow(|v| {
+        let Some(v) = v else { return };
+        let _ = v.set_visible(shown);
+        let level = if shown { COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL } else { COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW };
+        // SAFETY: COM calls on the controller's own (STA) thread.
+        unsafe {
+            if let Ok(wv) = v.controller().CoreWebView2().and_then(|w| w.cast::<ICoreWebView2_19>()) {
+                let _ = wv.SetMemoryUsageTargetLevel(level);
+            }
+        }
+    });
+}
+
 /// Posted to itself after the window shows: Explorer re-adds a taskbar button on every show.
 const WM_DROP_TAB: u32 = WM_APP + 3;
 
@@ -165,8 +196,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             });
             LRESULT(0)
         }
-        WM_SHOWWINDOW if wp.0 != 0 => {
-            let _ = PostMessageW(Some(hwnd), WM_DROP_TAB, WPARAM(0), LPARAM(0));
+        WM_SHOWWINDOW => {
+            set_view_shown(wp.0 != 0);
+            if wp.0 != 0 {
+                let _ = PostMessageW(Some(hwnd), WM_DROP_TAB, WPARAM(0), LPARAM(0));
+            }
             DefWindowProcW(hwnd, msg, wp, lp)
         }
         WM_DROP_TAB => {
@@ -193,10 +227,17 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
     }
 }
 
+/// The page may load only LockIn's own files: no remote script, style, image, font, fetch or
+/// frame. Inline `style` attributes are set by the page's own templates; inline scripts are not.
+const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
+    img-src 'self' blob:; font-src 'self'; connect-src 'self'; frame-src 'none'; object-src 'none'; \
+    base-uri 'none'; form-action 'none'";
+
 fn respond(mime: &str, body: Cow<'static, [u8]>) -> Response<Cow<'static, [u8]>> {
     Response::builder()
         .header(CONTENT_TYPE, mime)
         .header("Cache-Control", "no-store")
+        .header("Content-Security-Policy", CSP)
         .body(body)
         .unwrap()
 }
@@ -287,7 +328,15 @@ fn run(slot: Arc<AtomicIsize>, shared: Arc<Shared>) {
             .with_url("lockin://localhost/index.html")
             .with_background_color((BG.0, BG.1, BG.2, 255))
             .with_custom_protocol("lockin".into(), move |_, req| serve(&serve_shared, &req))
+            // The window only ever shows LockIn's own page: a dropped file, a stray link or an
+            // injected redirect can't load anything else that could then drive the app over IPC.
+            .with_navigation_handler(|url| is_app_url(&url))
+            .with_new_window_req_handler(|_, _| NewWindowResponse::Deny)
+            .with_download_started_handler(|_, _| false)
             .with_ipc_handler(move |req| {
+                if !is_app_url(&req.uri().to_string()) {
+                    return;
+                }
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(req.body()) {
                     let _ = ipc_shared.actions.lock().unwrap().send(v);
                     (ipc_shared.wake)();

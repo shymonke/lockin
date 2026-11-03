@@ -298,12 +298,17 @@ impl App {
             }
         }
         let (tone, label) = self.status();
-        // The ball keeps the calibration ball's blue; it only changes for trouble.
-        let looking_away = self.pomo.focusing() && self.s.camera_enabled && matches!(self.cam.gaze, Some(Gaze::Away | Gaze::Absent));
+        // The ball keeps the calibration ball's blue and turns red for trouble. With gaze colours
+        // on, it also shows where you look during focus: blue screen, green book, amber away.
+        let watching = self.pomo.focusing() && self.s.camera_enabled;
         let ball_tone = if self.on_blocked_site() || self.alarm_active() {
             theme::ALERT
-        } else if looking_away {
-            theme::CAUTION
+        } else if watching && self.s.ball_gaze_colors {
+            match self.cam.gaze {
+                Some(Gaze::Book) => theme::FOCUS,
+                Some(Gaze::Away | Gaze::Absent) => theme::CAUTION,
+                _ => theme::GAZE,
+            }
         } else {
             theme::GAZE
         };

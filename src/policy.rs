@@ -167,12 +167,47 @@ pub fn gaze_yaw(head_yaw: f32, iris_x: f32) -> f32 {
 /// Classifier inputs: the stored `GAZE_FEATURES` plus gaze yaw, derived here so calibrations saved
 /// before it existed keep working.
 const CLASS_FEATURES: usize = GAZE_FEATURES + 1;
+/// Gaze pitch (head plus eyes, degrees, positive = down) and gaze yaw in `class_values`.
+const GAZE_PITCH: usize = GAZE_FEATURES - 1;
+const GAZE_YAW: usize = GAZE_FEATURES;
 
 fn class_values(v: &[f32]) -> [f32; CLASS_FEATURES] {
     let mut out = [0.0; CLASS_FEATURES];
     out[..GAZE_FEATURES].copy_from_slice(&v[..GAZE_FEATURES]);
-    out[GAZE_FEATURES] = gaze_yaw(v[0], (v[3] + v[5]) * 0.5);
+    out[GAZE_YAW] = gaze_yaw(v[0], (v[3] + v[5]) * 0.5);
     out
+}
+
+/// The desk below the book: looking at least as far down as the calibrated book, within its
+/// sideways spread plus a margin. Writing, the bottom of the page and notes beside the book all
+/// land here, and a narrow book calibration would otherwise call them outliers (Away). `None`
+/// when the book was not calibrated clearly below the screen.
+struct DownCone {
+    pitch: f32,
+    yaw: f32,
+    half_width: f32,
+}
+
+impl DownCone {
+    /// The book must sit at least this far below the screen for "further down" to mean the desk.
+    const MIN_DROP_DEG: f32 = 3.0;
+    /// Sideways slack beyond the widest book sample: gaze yaw gets noisy as the lids drop.
+    const YAW_MARGIN_DEG: f32 = 12.0;
+
+    fn new(screen: &[[f32; CLASS_FEATURES]], book: &[[f32; CLASS_FEATURES]]) -> Option<Self> {
+        let mean = |s: &[[f32; CLASS_FEATURES]], i: usize| s.iter().map(|x| x[i]).sum::<f32>() / s.len() as f32;
+        let pitch = mean(book, GAZE_PITCH);
+        if pitch < mean(screen, GAZE_PITCH) + Self::MIN_DROP_DEG {
+            return None;
+        }
+        let yaw = mean(book, GAZE_YAW);
+        let spread = book.iter().map(|x| (x[GAZE_YAW] - yaw).abs()).fold(0.0, f32::max);
+        Some(DownCone { pitch, yaw, half_width: spread + Self::YAW_MARGIN_DEG })
+    }
+
+    fn contains(&self, v: &[f32; CLASS_FEATURES]) -> bool {
+        v[GAZE_PITCH] >= self.pitch && (v[GAZE_YAW] - self.yaw).abs() <= self.half_width
+    }
 }
 
 /// Classify a complete eye/head feature vector with a per-user diagonal Gaussian model.
@@ -203,16 +238,33 @@ pub fn classify_gaze_features(sample: &FeatureSample, cal: &Calibration, mode: G
         GazeMode::GazeOnly => GAZE_ONLY,
     };
     let weight_sum: f32 = weights.iter().sum();
-    let classes: [(&[FeatureSample], Gaze); 3] = [
+    let raw: [(&[FeatureSample], Gaze); 3] = [
         (&cal.screen_samples, Gaze::Screen),
         (&cal.book_samples, Gaze::Book),
         (&cal.away_samples, Gaze::Away),
     ];
-    let stale = |s: &[FeatureSample]| s.len() < MIN_SAMPLES || s.iter().any(|x| x.values.len() != GAZE_FEATURES);
-    if sample.values.len() != GAZE_FEATURES || classes.iter().any(|(s, _)| stale(s)) {
+    // Wrong length (older feature set) or a non-finite value (degenerate landmarks): the model
+    // can't judge it, so the caller falls back to the head-pose classifier.
+    let usable = |x: &FeatureSample| x.values.len() == GAZE_FEATURES && x.values.iter().all(|v| v.is_finite());
+    let stale = |s: &[FeatureSample]| s.len() < MIN_SAMPLES || !s.iter().all(usable);
+    if !usable(sample) || raw.iter().any(|(s, _)| stale(s)) {
         return None;
     }
-    let classes = classes.map(|(s, g)| (s.iter().map(|x| class_values(&x.values)).collect::<Vec<_>>(), g));
+    let mut classes: Vec<(Vec<[f32; CLASS_FEATURES]>, Gaze)> =
+        raw.iter().map(|(s, g)| (s.iter().map(|x| class_values(&x.values)).collect(), *g)).collect();
+    let values = class_values(&sample.values);
+
+    if let Some(cone) = DownCone::new(&classes[0].0, &classes[1].0) {
+        if cone.contains(&values) {
+            return Some((Gaze::Book, 0.8));
+        }
+        // "Away" glances that went down to the desk would pull book-like looks toward Away.
+        classes[2].0.retain(|v| !cone.contains(v));
+        if classes[2].0.len() < MIN_SAMPLES {
+            // Too few left to model; far-off looks still read as Away through the outlier test.
+            classes.pop();
+        }
+    }
 
     let total = classes.iter().map(|(s, _)| s.len()).sum::<usize>() as f32;
     let mut mean = [0.0f32; CLASS_FEATURES];
@@ -235,10 +287,9 @@ pub fn classify_gaze_features(sample: &FeatureSample, cal: &Calibration, mode: G
         *x = x.sqrt().max(floor);
     }
 
-    let values = class_values(&sample.values);
     let z: [f32; CLASS_FEATURES] = std::array::from_fn(|i| (values[i] - mean[i]) / scale[i]);
-    let mut scored = [(Gaze::Away, f32::INFINITY, f32::INFINITY); 3];
-    for (ci, (samples, gaze)) in classes.iter().enumerate() {
+    let mut scored: Vec<(Gaze, f32, f32)> = Vec::with_capacity(classes.len());
+    for (samples, gaze) in &classes {
         let n = samples.len() as f32;
         let mut cm = [0.0f32; CLASS_FEATURES];
         for s in samples {
@@ -261,7 +312,7 @@ pub fn classify_gaze_features(sample: &FeatureSample, cal: &Calibration, mode: G
             d2 += weights[i] * q / weight_sum;
             nll += weights[i] * (q + v.ln()) / weight_sum;
         }
-        scored[ci] = (*gaze, d2, nll);
+        scored.push((*gaze, d2, nll));
     }
     scored.sort_by(|a, b| a.2.total_cmp(&b.2));
     if scored[0].1 > OUTLIER_D2 {
@@ -278,6 +329,9 @@ const PERSON_VALID_SECS: f64 = 20.0;
 const POSTURE_SECS: f64 = 30.0;
 const POSTURE_COOLDOWN: f64 = 600.0;
 const REARM_SECS: f64 = 10.0;
+/// Face area at most this fraction of the calibrated screen pose = leaning back (about 15 %
+/// farther from the camera, since area falls with distance squared).
+const LEAN_BACK_AREA: f32 = 0.75;
 
 #[derive(Default)]
 pub struct Policy {
@@ -414,10 +468,17 @@ impl Policy {
         }
         let held = now - self.gaze_since;
         self.set_fast(matches!(gaze, Gaze::Away | Gaze::Absent) || self.phone_hits > 0, &mut out);
+        // Leaning back from the screen (face clearly smaller than at calibration) while looking
+        // away is usually thinking; it gets the longer grace.
+        let leaning_back = match (s.calibration.screen, obs.face) {
+            (Some(cal), Some(p)) => cal.area > 0.0 && p.area <= cal.area * LEAN_BACK_AREA,
+            _ => false,
+        };
+        let away_grace = if leaning_back { s.away_secs.max(s.think_secs) } else { s.away_secs };
 
         match gaze {
             Gaze::Absent if held >= s.absent_secs as f64 => self.alarm(Kind::Absent, now, &mut out),
-            Gaze::Away if held >= s.away_secs as f64 => self.alarm(Kind::LookingAway, now, &mut out),
+            Gaze::Away if held >= away_grace as f64 => self.alarm(Kind::LookingAway, now, &mut out),
             Gaze::Screen | Gaze::Book => {
                 self.recover_if(|k| matches!(k, Kind::Absent | Kind::LookingAway), &mut out);
             }
@@ -729,6 +790,50 @@ mod tests {
     }
 
     #[test]
+    fn looking_further_down_than_the_book_is_the_desk_not_away() {
+        let cal = trained_calibration();
+        // Writing below the page: head down further, lids nearly closed, gaze pitch well past the
+        // book pose. Far from every calibrated cluster, so the outlier test used to call it Away.
+        let writing = FeatureSample {
+            values: vec![1.0, 24.0, 0.5, 0.50, 0.95, 0.50, 0.95, 0.12, 0.12, 0.07, 0.50, 0.60, 0.0, -0.7, 40.0],
+        };
+        // Just as far down but turned well to the side (a phone beside the desk): still Away.
+        let side = FeatureSample {
+            values: vec![40.0, 24.0, 0.5, 0.80, 0.95, 0.80, 0.95, 0.12, 0.12, 0.07, 0.65, 0.60, 0.6, -0.7, 40.0],
+        };
+        for mode in [GazeMode::Combined, GazeMode::GazeOnly] {
+            assert_eq!(classify_gaze_features(&writing, &cal, mode).unwrap().0, Gaze::Book, "{mode:?}");
+            assert_eq!(classify_gaze_features(&side, &cal, mode).unwrap().0, Gaze::Away, "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn leaning_back_gets_the_thinking_grace() {
+        let s = Settings {
+            away_secs: 20,
+            think_secs: 60,
+            calibration: Calibration {
+                screen: Some(Pose { area: 0.06, ..Default::default() }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let away = |area| CamObs {
+            face: Some(Pose { area, ..Default::default() }),
+            gaze: Some((Gaze::Away, 0.9)),
+            ..Default::default()
+        };
+        let mut upright = Policy::default();
+        upright.on_camera(away(0.06), 0.0, &s);
+        assert_eq!(alarms(&upright.on_camera(away(0.06), 21.0, &s)).len(), 1);
+
+        let mut back = Policy::default();
+        back.on_camera(away(0.04), 0.0, &s);
+        assert!(alarms(&back.on_camera(away(0.04), 30.0, &s)).is_empty());
+        assert_eq!(alarms(&back.on_camera(away(0.04), 61.0, &s)).len(), 1);
+    }
+
+    #[test]
     fn feature_classifier_falls_back_to_away_for_outliers() {
         let cal = trained_calibration();
         let sample = FeatureSample { values: vec![200.0; GAZE_FEATURES] };
@@ -760,5 +865,19 @@ mod tests {
         let mut cal = trained_calibration();
         cal.screen_samples.iter_mut().for_each(|s| s.values.truncate(12));
         assert_eq!(classify_gaze_features(&cal.book_samples[0], &cal, GazeMode::Combined), None);
+    }
+
+    #[test]
+    fn non_finite_features_are_not_judged() {
+        let cal = trained_calibration();
+        // Infinite gaze pitch with a book-like yaw used to land in the desk cone as Book.
+        let mut down = cal.book_samples[3].clone();
+        down.values[GAZE_FEATURES - 1] = f32::INFINITY;
+        let mut nan = cal.screen_samples[3].clone();
+        nan.values[4] = f32::NAN;
+        for mode in [GazeMode::Combined, GazeMode::GazeOnly] {
+            assert_eq!(classify_gaze_features(&down, &cal, mode), None, "{mode:?}");
+            assert_eq!(classify_gaze_features(&nan, &cal, mode), None, "{mode:?}");
+        }
     }
 }

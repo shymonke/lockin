@@ -109,13 +109,23 @@ fn main() {
     );
 }
 
-/// One overlay at a time (hotkeys and the camera are exclusive anyway).
+/// Set on the instance spawned by "Restart LockIn".
+pub const RESTART_ENV: &str = "LOCKIN_RESTART";
+
+/// One overlay at a time (hotkeys and the camera are exclusive anyway). A restarted instance
+/// waits for the old one to exit (its mutex is then abandoned and passes to us).
 fn single_instance() -> bool {
     use windows::core::w;
-    use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
-    use windows::Win32::System::Threading::CreateMutexW;
+    use windows::Win32::Foundation::{WAIT_ABANDONED, WAIT_OBJECT_0};
+    use windows::Win32::System::Threading::{CreateMutexW, WaitForSingleObject};
+    let wait_ms = if std::env::var_os(RESTART_ENV).is_some() { 15_000 } else { 0 };
+    // Children (WebView2) need not see it.
+    std::env::remove_var(RESTART_ENV);
     // SAFETY: named mutex lives for the process lifetime (handle intentionally leaked).
-    unsafe { CreateMutexW(None, true, w!("Local\\LockIn.SingleInstance")).is_ok() && GetLastError() != ERROR_ALREADY_EXISTS }
+    unsafe {
+        let Ok(m) = CreateMutexW(None, false, w!("Local\\LockIn.SingleInstance")) else { return false };
+        matches!(WaitForSingleObject(m, wait_ms), WAIT_OBJECT_0 | WAIT_ABANDONED)
+    }
 }
 
 /// `lockin --diag [image ...]`: run the models on images (or the live camera when none given)

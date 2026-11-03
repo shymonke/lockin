@@ -20,7 +20,6 @@ pub struct Camera {
     width: u32,
     height: u32,
     stride: i32,
-    last_grab: Option<std::time::Instant>,
 }
 
 impl Drop for Camera {
@@ -116,7 +115,7 @@ impl Camera {
             let cur = reader.GetCurrentMediaType(STREAM)?;
             let (width, height) = frame_size(&cur).unwrap_or((640, 480));
             let stride = cur.GetUINT32(&MF_MT_DEFAULT_STRIDE).map(|v| v as i32).unwrap_or(width as i32 * 4);
-            Ok(Camera { source, reader, width, height, stride, last_grab: None })
+            Ok(Camera { source, reader, width, height, stride })
         }
     }
 
@@ -132,19 +131,23 @@ impl Camera {
 
     /// Grab the freshest frame into `frame` (reuses its buffer).
     pub fn grab(&mut self, frame: &mut Frame) -> Result<()> {
-        // The first read after an idle gap can be stale. At preview cadence there is no queue to
-        // drain, and reading twice would cap a 30 fps camera below the requested ~12 fps preview.
-        let reads = if self.last_grab.is_none_or(|t| t.elapsed() > std::time::Duration::from_millis(500)) { 2 } else { 1 };
+        // The reader keeps the last few frames (about three) queued between reads, so the first
+        // reads return at once with frames up to ~100 ms old. Read on until one has to wait for
+        // the camera: that frame was just captured.
+        const FRESH_WAIT: std::time::Duration = std::time::Duration::from_millis(12);
         let mut sample = None;
-        for _ in 0..reads {
+        for _ in 0..6 {
+            let t = std::time::Instant::now();
             for _ in 0..30 {
                 if let Some(s) = self.read_sample()? {
                     sample = Some(s);
                     break;
                 }
             }
+            if t.elapsed() >= FRESH_WAIT {
+                break;
+            }
         }
-        self.last_grab = Some(std::time::Instant::now());
         let sample = sample.ok_or_else(|| windows::core::Error::from(MF_E_NO_SAMPLE_TIMESTAMP))?;
         unsafe {
             let buf = sample.ConvertToContiguousBuffer()?;

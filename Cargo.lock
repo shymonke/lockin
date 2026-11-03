@@ -1625,7 +1625,7 @@ dependencies = [
 
 [[package]]
 name = "lockin"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "eframe",
  "image",
@@ -1634,6 +1634,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tract-onnx",
+ "webview2-com",
  "windows",
  "wry",
 ]

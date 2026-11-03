@@ -1,6 +1,6 @@
 [package]
 name = "lockin"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "Local, low-RAM study focus tracker overlay"
 license = "MIT"
@@ -36,6 +36,7 @@ windows = { version = "0.62.2", features = [
     "Win32_UI_Shell",
     "Win32_Networking_WinHttp",
 ] }
+webview2-com = "0.39"
 wry = { version = "0.57", default-features = false }
 
 [profile.release]

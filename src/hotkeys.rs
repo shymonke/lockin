@@ -28,6 +28,8 @@ pub enum Hotkey {
     ClickThrough,
     Camera,
     /// Tray menu only; no shortcut.
+    Autostart,
+    Restart,
     Quit,
 }
 
@@ -151,7 +153,7 @@ impl Keybinds {
             Hotkey::Camera => self.camera,
             Hotkey::Calculator => self.calculator,
             Hotkey::ClickThrough => self.click_through,
-            Hotkey::Quit => None,
+            Hotkey::Autostart | Hotkey::Restart | Hotkey::Quit => None,
         }
         .filter(Binding::valid)
     }

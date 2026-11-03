@@ -4,10 +4,16 @@
 
 use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::Foundation::ERROR_FILE_NOT_FOUND;
-use windows::Win32::System::Registry::{RegDeleteKeyValueW, RegSetKeyValueW, HKEY_CURRENT_USER, REG_SZ};
+use windows::Win32::System::Registry::{RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW, HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_SZ};
 
 const RUN: PCWSTR = w!(r"Software\Microsoft\Windows\CurrentVersion\Run");
 const NAME: PCWSTR = w!("LockIn");
+
+/// The Run entry exists (what Windows will actually do at sign-in).
+pub fn enabled() -> bool {
+    // SAFETY: existence query only; no output buffers.
+    unsafe { RegGetValueW(HKEY_CURRENT_USER, RUN, NAME, RRF_RT_REG_SZ, None, None, None).is_ok() }
+}
 
 pub fn apply(on: bool) -> Result<(), String> {
     // SAFETY: registry calls with valid, NUL-terminated strings that outlive them.

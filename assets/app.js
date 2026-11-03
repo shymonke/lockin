@@ -588,13 +588,15 @@ const SECTIONS = {
         <select class="field" id="f-mode" data-k="camera_mode"><option value="Interval">Every few seconds (saves power)</option><option value="Always">Continuously, 2 per second</option></select></div>
       ${num("check_interval_secs", "Check every", 1, 30, "sec")}
       ${sw("hide_camera_image", "Hide the camera picture", "Only the tracking lines show here, handy when sharing your screen")}
-      <div class="row"><label for="f-gaze_mode">Decide by<small>For testing: “Gaze only” ignores head pose and distance and uses just where your eyes point</small></label>
-        <select class="field" id="f-gaze_mode" data-k="gaze_mode"><option value="Combined">Gaze, head and position</option><option value="GazeOnly">Gaze only</option></select></div>
+      ${sw("preview_mesh", "Show the full face mesh", "Off, the preview draws only your eyes and where they point")}
+      <div class="row"><label for="f-gaze_mode">Decide by<small>“Gaze only” uses just where your eyes point; the other also weighs head pose and distance</small></label>
+        <select class="field" id="f-gaze_mode" data-k="gaze_mode"><option value="GazeOnly">Gaze only</option><option value="Combined">Gaze, head and position</option></select></div>
       <p class="help">Frames stay in memory and are never saved. The camera turns off during breaks.</p>
     </div>
     <div class="group"><h4>When to alert</h4>
       ${num("absent_secs", "Away from the desk for", 5, 600, "sec")}
       ${num("away_secs", "Looking away for", 5, 600, "sec")}
+      ${num("think_secs", "Leaning back to think for", 5, 600, "sec", "Looking away while sitting back from the screen gets this longer allowance")}
       ${num("screen_secs", "On the screen for", 10, 3600, "sec", "Then the open site is checked against your lists")}
       ${sw("phone_detection", "Look for a phone while my head is down")}
       ${num("phone_check_secs", "Phone check every", 10, 600, "sec")}
@@ -655,9 +657,10 @@ const SECTIONS = {
         <select class="field" id="f-pill_theme" data-k="pill_theme"><option value="Slate">Slate</option><option value="Midnight">Midnight</option><option value="Glass">Glass</option></select></div>
       <div class="row"><label for="f-pill_opacity">Opacity<small>It turns fully visible while your mouse is over it</small></label><input id="f-pill_opacity" data-k="pill_opacity" type="range" min="0.3" max="1" step="0.02"></div>
     </div>
-    <div class="group"><h4>Ball</h4><p class="help">When idle the bar folds into a ball. Blue normally, amber while you look away, red on a blocked site or alarm.</p>
+    <div class="group"><h4>Ball</h4><p class="help">When idle the bar folds into a ball. It turns red on a blocked site or alarm.</p>
       ${sw("pill_fold", "Fold into a ball when idle", "It opens again under the mouse or for an alert")}
       ${sw("pill_clock", "Clock around the ball", "A ring that fills as the block runs, with a hand at its end")}
+      ${sw("ball_gaze_colors", "Ball shows where you look", "During focus: blue on the screen, green on the book, amber looking away. Off, it stays blue")}
       ${num("pill_fold_secs", "Fold after", 2, 120, "sec")}
     </div>
     <div class="group"><h4>Behaviour</h4>
@@ -843,7 +846,7 @@ document.addEventListener("keydown", (e) => {
 
 const CAL = {
   screen: ["Look at your screen", "This window steps aside and the timer bar turns into a ball. Follow it across the screen with your eyes. When it rests in the middle and breathes, tip your head down toward the keyboard and back up, eyes still on the ball."],
-  book: ["Look at your book", "Read a few lines the way you normally study."],
+  book: ["Look at your book", "Study as you normally do: read a few lines, glance at the bottom of the page and at the spot where you write."],
   away: ["Look away", "Look around the room, at the wall, out of the window. Not at the desk."],
 };
 const ORDER = ["screen", "book", "away"];

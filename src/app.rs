@@ -143,6 +143,7 @@ impl App {
         vision::spawn(vrx, vmsg_tx, Box::new(wake.clone()), preview.clone());
         let _ = vtx.send(vision::Cmd::SetCalibration(s.calibration.clone()));
         let _ = vtx.send(vision::Cmd::SetGazeMode(s.gaze_mode));
+        let _ = vtx.send(vision::Cmd::SetPreviewMesh(s.preview_mesh));
         let (stx, srx) = channel();
         let (smsg_tx, smsg_rx) = channel();
         screen::spawn(srx, smsg_tx, Box::new(wake.clone()));
@@ -172,7 +173,7 @@ impl App {
 
         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(7);
         let click_through = s.overlay_click_through;
-        App {
+        let mut app = App {
             pomo: Pomodoro::new(&s),
             saved_s: s.clone(),
             s,
@@ -227,7 +228,11 @@ impl App {
             alert_seen: None,
             startup_error,
             demo: None,
+        };
+        if let Some(note) = app.tasks.load_note.take() {
+            app.info(copy::Line { title: "Your task list couldn't be loaded".into(), body: note }, 30.0);
         }
+        app
     }
 
     pub fn now(&self) -> f64 {
@@ -425,6 +430,9 @@ impl App {
             let startup_changed = new.launch_at_startup != self.s.launch_at_startup;
             if new.gaze_mode != self.s.gaze_mode {
                 let _ = self.vision.send(vision::Cmd::SetGazeMode(new.gaze_mode));
+            }
+            if new.preview_mesh != self.s.preview_mesh {
+                let _ = self.vision.send(vision::Cmd::SetPreviewMesh(new.preview_mesh));
             }
             self.s = new;
             self.pomo.apply_durations(&self.s);
@@ -818,6 +826,20 @@ impl App {
                 }
                 Hotkey::ClickThrough => self.set_click_through(!self.click_through, ctx),
                 Hotkey::Camera => self.toggle_camera(),
+                Hotkey::Autostart => {
+                    // Flip what Windows will actually do, so the tray checkmark and the toggle agree.
+                    self.s.launch_at_startup = !crate::autostart::enabled();
+                    self.startup_error = crate::autostart::apply(self.s.launch_at_startup).err();
+                    self.s.save();
+                }
+                Hotkey::Restart => {
+                    self.shutdown();
+                    // The new instance waits for this one to exit and release the single-instance mutex.
+                    if let Ok(exe) = std::env::current_exe() {
+                        let _ = std::process::Command::new(exe).args(std::env::args_os().skip(1)).env(crate::RESTART_ENV, "1").spawn();
+                    }
+                    std::process::exit(0);
+                }
                 Hotkey::Quit => {
                     self.shutdown();
                     std::process::exit(0);

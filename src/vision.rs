@@ -551,6 +551,8 @@ pub enum Cmd {
     Preview(Option<u32>),
     SetCalibration(Calibration),
     SetGazeMode(crate::config::GazeMode),
+    /// Preview overlay carries the whole face mesh (`true`) or only the eyes.
+    SetPreviewMesh(bool),
     Calibrate { camera: u32, target: CalTarget },
     Quit,
 }
@@ -621,6 +623,7 @@ struct Worker {
     last_objects: Option<Objects>,
     calibration: Calibration,
     gaze_mode: crate::config::GazeMode,
+    preview_mesh: bool,
     frame: Frame,
     /// Face box from the previous frame's mesh: seeds the next crop so YuNet only runs to
     /// (re)acquire the face, as in MediaPipe's tracking mode.
@@ -753,10 +756,11 @@ impl Worker {
         let last = self.last_objects;
         let overlay = Overlay {
             face: a.face.map(|f| f.rect),
+            // Off: only the eye outlines and irises (in `eyes`) are drawn.
             landmarks: match (&a.mesh, a.face) {
-                (Some(m), _) => m.points.clone(),
-                (None, Some(f)) => f.landmarks.to_vec(),
-                (None, None) => Vec::new(),
+                (Some(m), _) if self.preview_mesh => m.points.clone(),
+                (None, Some(f)) if self.preview_mesh => f.landmarks.to_vec(),
+                _ => Vec::new(),
             },
             eyes: a.mesh.as_ref().map(Mesh::overlays).unwrap_or_default(),
             head: a.mesh.as_ref().map(Mesh::head),
@@ -899,6 +903,7 @@ pub fn spawn(rx: Receiver<Cmd>, tx: Sender<Msg>, wake: Box<dyn Fn() + Send>, pre
                 last_objects: None,
                 calibration: Calibration::default(),
                 gaze_mode: Default::default(),
+                preview_mesh: false,
                 frame: Frame {
                     width: 0,
                     height: 0,
@@ -975,6 +980,10 @@ pub fn spawn(rx: Receiver<Cmd>, tx: Sender<Msg>, wake: Box<dyn Fn() + Send>, pre
                     }
                     Some(Cmd::SetGazeMode(mode)) => {
                         w.gaze_mode = mode;
+                        continue;
+                    }
+                    Some(Cmd::SetPreviewMesh(on)) => {
+                        w.preview_mesh = on;
                         continue;
                     }
                     Some(Cmd::Fast(on)) => {

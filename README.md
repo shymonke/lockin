@@ -5,7 +5,7 @@ for distraction in layers: cheap checks run all the time, heavier ones only when
 Nothing leaves your machine unless you send feedback from the main window. Camera frames are
 analysed in memory and never saved. The screen layer never captures pixels.
 
-[![LockIn demo (56 s); click for the full-resolution video](.github/demo.webp)](https://github.com/shymonke/lockin/releases/download/v0.1.0/lockin-demo.mp4)
+[![LockIn demo (56 s); click for the full-resolution video](.github/demo.gif)](https://github.com/shymonke/lockin/releases/download/v0.1.0/lockin-demo.mp4)
 
 **[Download for Windows](https://github.com/shymonke/lockin/releases/latest)**: unzip and run `lockin.exe`
 (needs the WebView2 runtime, built into Windows 10 and 11).
@@ -18,17 +18,20 @@ analysed in memory and never saved. The screen layer never captures pixels.
   opens the main window. Click-through (Settings → Timer bar, or a shortcut you bind) lets clicks
   pass to the window below until you turn it off or restart LockIn. After a few idle seconds it folds into
   a ball drawn like the LockIn mark: a clock ring that fills with the phase (green focus, blue
-  break), a hand at its end, and the calibration ball's blue in the middle (amber looking away, red
-  on a blocked site or alarm); Settings → Timer bar → Clock around the ball turns the ring and hand
+  break), a hand at its end, and a centre that shows where you look during focus (blue screen,
+  green book, amber away; red on a blocked site or alarm). Settings → Timer bar → "Ball shows where
+  you look" off keeps it blue except for red, and "Clock around the ball" turns the ring and hand
   off. Hovering the ball, or an alert, unfolds it, and alert cards grow out of the
   ball. Minimising (Win+M, Win+D) never hides it.
 - **Tray icon**: click opens the main window; right-click for start/pause, step away, the
-  calculator, click-through and Quit, each with its current shortcut. LockIn has no taskbar button:
-  minimising the main window tucks it into the tray.
+  calculator, click-through (each with its current shortcut), Start with Windows (checked while
+  on), Restart and Quit. LockIn has no taskbar button: minimising the main window tucks it into the
+  tray.
 - **Main window** (Ctrl+Alt+O, which also brings the timer bar back): fits the window without
   scrolling. On the left, your live camera at its own aspect ratio (nothing cropped) with the
   tracking drawn over it — eye outlines, irises, a gaze arrow and a plain-language label ("Looking at
-  your book", 87 %) — and the year's pomodoro heatmap under it. On the right the session clock,
+  your book", 87 %); Settings → Camera → "Show the full face mesh" adds the 478 mesh points (off by
+  default) — and the year's pomodoro heatmap under it. On the right the session clock,
   start / step-away buttons, today's numbers, and the task and idea lists, which scroll inside
   their cards. Below 860 px wide the columns stack.
   Settings slide in from the right. The header links to LockIn on GitHub and, in builds that carry a
@@ -79,22 +82,32 @@ flowchart LR
   for a while; two phone sightings in a row ring the phone alarm.
 - **Calibration** (main window → Calibrate, ~20 s): the main window steps aside and the timer bar
   folds into a ball that tours the whole screen, a soft note on each spot; when it rests in the
-  middle, tip your head toward the keyboard and back with your eyes on it. Then read your book and
-  look around the room. Redo it when you move the laptop. Uncalibrated, LockIn falls back to head pose.
+  middle, tip your head toward the keyboard and back with your eyes on it. Then study your book as
+  usual (a few lines, the bottom of the page, where you write) and look around the room. Redo it when
+  you move the laptop. Uncalibrated, LockIn falls back to head pose.
   The camera stays on through each step, also while the main window steps aside and with the camera
   switch off. No step samples before the camera delivers frames and the face models have read one:
   the ball breathes at its first spot, the book and away steps say "Starting the camera…".
   Calibrations saved by older versions (different features) are dropped on start; calibrate again.
+- **Desk below the book**: looking at least as far down as your calibrated book, within its sideways
+  range plus 12°, counts as the book (writing, the bottom of the page), and "away" calibration
+  samples that fell there are ignored. A phone held low out of the camera's view looks the same and
+  can't be told apart; the phone check only sees phones in frame.
+- **Leaning back**: looking away while your face is clearly smaller than at calibration (sitting back,
+  about 15 % farther) is allowed "Leaning back to think for" (60 s) instead of "Looking away for" (20 s).
 - **Eyes first**: the classifier weights iris position, eyelids, eye-look, gaze pitch and gaze yaw
   (head angle plus the eyes' turn in the head) above head angles and face size/position, so tipping
   or turning your head, or leaning in, while your eyes stay on the screen stays "screen". Gaze yaw is
   derived from the stored features, so existing calibrations keep working. Settings → Camera →
-  "Decide by: Gaze only" uses nothing but the two gaze angles and eyelid openness (for comparing),
-  and skips the blendshape model on live checks (calibration still runs it, so one calibration
-  serves both modes). The mesh itself can't be trimmed: the gaze angles come from its iris and
-  eyelid points, and the network computes all 478 points in one pass. The main window's readout
-  shows the live gaze yaw and pitch, and under Check this frame's time plus the 5th–95th percentile
-  range of the last ~3 s.
+  "Decide by" defaults to "Gaze only": nothing but the two gaze angles and eyelid openness, and it
+  skips the blendshape model on live checks (calibration still runs it, so one calibration serves
+  both modes; "Gaze, head and position" also weighs head pose and distance). Gaze only is not
+  faster to compute: the blendshape model takes ~1 ms, the 478-point mesh ~32 ms either way, and the
+  mesh can't be trimmed because the gaze angles come from its iris and eyelid points, computed in
+  one pass. Each check uses the frame the camera just captured: the reader queues about three
+  frames, so LockIn reads past the queued ones (otherwise checks would see ~100 ms old frames).
+  The main window's readout shows the live gaze yaw and pitch, and under Check this frame's time
+  plus the 5th–95th percentile range of the last ~3 s.
 - **Sites**: the first visit to a blocked site warns; the second visit, or staying past the limit,
   rings the alarm. Ask-sites (YouTube, Reddit) get "for study or distraction?". App names such as
   `discord.exe` work too.
@@ -121,8 +134,8 @@ wheel-down binding stops scrolling).
 | Ctrl+Alt+O | Main window (and show the timer bar) |
 | (none) | Timer bar click-through on/off; unbound by default so it cannot be turned on by accident |
 
-**Start with Windows** (Settings → Shortcuts → Windows) adds a per-user Run entry for the exe you
-started; it is rewritten on every start, so sign-in launches the build you ran last.
+**Start with Windows** (Settings → Shortcuts → Windows, or the tray menu) adds a per-user Run entry
+for the exe you started; it is rewritten on every start, so sign-in launches the build you ran last.
 
 ## Resource use
 
@@ -137,8 +150,10 @@ WebView2 helpers that exist only while the main window is open. CPU is the share
 | Focus block + main window open with live preview | 57 MB | 208 MB | 3.5 % |
 | Main window closed again | 46 MB | 46 MB | 0.0 % |
 
-Closing the main window ends its WebView2 processes. It runs without a GPU process and with a single
-renderer to stay small. Per check (release, 1280×720): face + mesh + blendshapes 45–50 ms, object
+Closing the main window ends its WebView2 processes; minimising it to the tray keeps them, marked
+hidden so the page stops polling the preview and the renderer trims its memory. WebView2 runs as
+three processes (browser with the compositor, network and audio in-process; one renderer; storage)
+without GPU acceleration. Per check (release, 1280×720): face + mesh + blendshapes 45–50 ms, object
 model 145–160 ms (one core).
 
 ## Build and run

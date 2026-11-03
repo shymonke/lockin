@@ -15,7 +15,7 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DispatchMessageW, GetCursorPos,
     GetMessageW, GetSystemMetrics, LoadImageW, PostMessageW, RegisterClassW, RegisterWindowMessageW,
-    SetForegroundWindow, TrackPopupMenu, HICON, IMAGE_ICON, LR_DEFAULTCOLOR, MF_SEPARATOR, MF_STRING, MSG,
+    SetForegroundWindow, TrackPopupMenu, HICON, IMAGE_ICON, LR_DEFAULTCOLOR, MF_CHECKED, MF_SEPARATOR, MF_STRING, MSG,
     SM_CXSMICON, SM_CYSMICON, TPM_BOTTOMALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WM_APP,
     WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WNDCLASSW, WS_POPUP,
 };
@@ -25,13 +25,15 @@ const ICON_ID: u32 = 1;
 /// Resource id of the app icon in `assets/brand/app.rc`.
 const IDI_LOCKIN: u16 = 1;
 
-const MENU: [(Hotkey, &str); 7] = [
+const MENU: [(Hotkey, &str); 9] = [
     (Hotkey::Settings, "Open LockIn"),
     (Hotkey::StartPause, "Start / pause"),
     (Hotkey::Brb, "Step away / I'm back"),
     (Hotkey::Camera, "Camera on / off"),
     (Hotkey::Calculator, "Calculator"),
     (Hotkey::ClickThrough, "Timer bar click-through"),
+    (Hotkey::Autostart, "Start with Windows"),
+    (Hotkey::Restart, "Restart LockIn"),
     (Hotkey::Quit, "Quit LockIn"),
 ];
 
@@ -132,7 +134,7 @@ unsafe fn menu(hwnd: HWND) {
     unsafe {
         let Ok(menu) = CreatePopupMenu() else { return };
         for (i, (hk, label)) in MENU.iter().enumerate() {
-            if *hk == Hotkey::Quit {
+            if *hk == Hotkey::Autostart {
                 let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
             }
             // Text, then the current shortcut right-aligned after a tab.
@@ -141,7 +143,8 @@ unsafe fn menu(hwnd: HWND) {
                 None => label.to_string(),
             };
             let wide = HSTRING::from(text);
-            let _ = AppendMenuW(menu, MF_STRING, i + 1, PCWSTR(wide.as_ptr()));
+            let flags = if *hk == Hotkey::Autostart && crate::autostart::enabled() { MF_STRING | MF_CHECKED } else { MF_STRING };
+            let _ = AppendMenuW(menu, flags, i + 1, PCWSTR(wide.as_ptr()));
         }
         let mut pt = POINT::default();
         let _ = GetCursorPos(&mut pt);

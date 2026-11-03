@@ -33,7 +33,8 @@ pub struct Pomodoro {
     /// Alarms this focus block (drives escalating penalties).
     pub block_alarms: u32,
     pub block_added_secs: u32,
-    /// Focus seconds actually earned (only while running, not BRB, not distracted).
+    /// Focus seconds actually earned (only while running, not BRB, not distracted). Running total
+    /// for the app's lifetime: the app books the growth since its last look, so a reset keeps it.
     pub earned_secs: f64,
 }
 
@@ -85,7 +86,7 @@ impl Pomodoro {
     }
 
     pub fn reset(&mut self, s: &Settings) {
-        *self = Pomodoro { completed_focus: self.completed_focus, ..Pomodoro::new(s) };
+        *self = Pomodoro { completed_focus: self.completed_focus, earned_secs: self.earned_secs, ..Pomodoro::new(s) };
     }
 
     pub fn skip(&mut self, s: &Settings) {
@@ -281,5 +282,22 @@ mod tests {
         p.skip(&s);
         assert_eq!(p.phase, Phase::Focus);
         assert!(!p.running, "auto_start_focus is off by default");
+    }
+
+    #[test]
+    fn reset_keeps_earned_focus_growing() {
+        // The app books `earned_secs` growth since its last look; a counter that dropped to 0 on
+        // reset hid the next block's time until it re-earned everything from before the reset.
+        let s = Settings { focus_min: 25, ..settings() };
+        let mut p = Pomodoro::new(&s);
+        p.toggle();
+        p.tick(600.0, &s);
+        let before = p.earned_secs;
+        p.reset(&s);
+        assert!(!p.running);
+        assert_eq!(p.remaining, 1500.0);
+        p.toggle();
+        p.tick(60.0, &s);
+        assert_eq!(p.earned_secs - before, 60.0);
     }
 }

@@ -66,9 +66,9 @@ pub enum CameraMode {
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum GazeMode {
     /// Gaze angles first, head pose and face placement as light hints.
-    #[default]
     Combined,
     /// Only the gaze angles (head plus eyes) and eyelid openness.
+    #[default]
     GazeOnly,
 }
 
@@ -131,6 +131,9 @@ pub struct Settings {
     pub check_interval_secs: u32,
     pub absent_secs: u32,
     pub away_secs: u32,
+    /// Looking away while leaning back from the screen (face clearly smaller than at calibration)
+    /// is allowed this long instead of `away_secs`: thinking, not wandering off.
+    pub think_secs: u32,
     pub screen_secs: u32,
     pub posture_hints: bool,
     pub lean_ratio: f32,
@@ -141,6 +144,8 @@ pub struct Settings {
     pub hide_camera_image: bool,
     /// Features the gaze classifier uses (testing switch in Settings → Camera).
     pub gaze_mode: GazeMode,
+    /// Dashboard preview draws the whole face mesh; off draws only the eye outlines and irises.
+    pub preview_mesh: bool,
 
     // Screen layer
     pub screen_enabled: bool,
@@ -169,6 +174,9 @@ pub struct Settings {
     pub pill_fold_secs: u32,
     /// Draw the folded ball as a clock (phase ring and hand); off leaves the plain ball.
     pub pill_clock: bool,
+    /// The folded ball takes the gaze colour during focus: blue on the screen, green on the book,
+    /// amber looking away. Off, it stays blue and only turns red for alarms and blocked sites.
+    pub ball_gaze_colors: bool,
     pub pill_theme: PillTheme,
     pub calc_pos: Option<[f32; 2]>,
     pub tour_done: bool,
@@ -207,6 +215,7 @@ impl Default for Settings {
             check_interval_secs: 3,
             absent_secs: 30,
             away_secs: 20,
+            think_secs: 60,
             screen_secs: 300,
             posture_hints: true,
             lean_ratio: 1.5,
@@ -214,7 +223,8 @@ impl Default for Settings {
             phone_check_secs: 45,
             calibration: Calibration::default(),
             hide_camera_image: false,
-            gaze_mode: GazeMode::Combined,
+            gaze_mode: GazeMode::GazeOnly,
+            preview_mesh: false,
 
             screen_enabled: true,
             blocked_sites: s(&["x.com", "twitter.com", "instagram.com", "tiktok.com", "facebook.com"]),
@@ -237,6 +247,7 @@ impl Default for Settings {
             pill_fold: true,
             pill_fold_secs: 6,
             pill_clock: true,
+            ball_gaze_colors: true,
             pill_theme: PillTheme::Glass,
             calc_pos: None,
             tour_done: false,
